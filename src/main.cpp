@@ -411,6 +411,7 @@ enum BuildFlagKind {
 	BuildFlag_InternalEnableRVO,
 
 	BuildFlag_Sanitize,
+	BuildFlag_XRayInstrument,
 	BuildFlag_LTO,
 
 #if defined(GB_SYSTEM_WINDOWS)
@@ -646,6 +647,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 
 
 	add_flag(&build_flags, BuildFlag_Sanitize,                str_lit("sanitize"),                  BuildFlagParam_String,  Command__does_build, true);
+	add_flag(&build_flags, BuildFlag_XRayInstrument,          str_lit("xray-instrument"),           BuildFlagParam_None,    Command__does_build);
 	add_flag(&build_flags, BuildFlag_LTO,                     str_lit("lto"),                       BuildFlagParam_String,  Command__does_build);
 
 
@@ -1669,6 +1671,11 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								gb_printf_err("-sanitize:<string> options are 'address', 'memory', and 'thread'\n");
 								bad_flags = true;
 							}
+							break;
+
+						case BuildFlag_XRayInstrument:
+							GB_ASSERT(value.kind == ExactValue_Invalid);
+							build_context.xray_instrument = true;
 							break;
 
 						case BuildFlag_LTO:
@@ -3018,6 +3025,9 @@ gb_internal int print_show_help(String const arg0, String command, String option
 				print_usage_line(3, "-sanitize:address");
 				print_usage_line(3, "-sanitize:memory");
 				print_usage_line(3, "-sanitize:thread");
+		}
+		if (print_flag("-xray-instrument")) {
+			print_usage_line(2, "Generates LLVM XRay instrumentation sleds and links the XRay runtime.");
 		}
 	}
 
