@@ -6852,7 +6852,6 @@ gb_internal lbAddr lb_build_addr_internal(lbProcedure *p, Ast *expr) {
 			} else {
 				addr = lb_build_addr(p, se->expr);
 			}
-			lb_mark_struct_field_usage(p, addr.tracked_field, 1<<0);
 
 			// NOTE(harold): Only allow ivar pseudo field access on indirect selectors.
 			//				 It is incoherent otherwise as Objective-C objects are zero-sized.
