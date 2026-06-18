@@ -407,7 +407,7 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 				lb_add_attribute_to_proc_with_string(m, p->value, str_lit("function-instrument"), str_lit("xray-never"));
 			}
 		} else {
-			lb_add_attribute_to_proc_with_string(m, p->value, str_lit("xray-instruction-threshold"), str_lit("200"));
+			lb_add_attribute_to_proc_with_string(m, p->value, str_lit("xray-instruction-threshold"), str_lit("50"));
 		}
 
 		if (entity->Procedure.xray_log_args_count > 0) {
