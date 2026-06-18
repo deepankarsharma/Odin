@@ -412,6 +412,7 @@ enum BuildFlagKind {
 
 	BuildFlag_Sanitize,
 	BuildFlag_XRayInstrument,
+	BuildFlag_XRayInstrumentPackages,
 	BuildFlag_LTO,
 
 #if defined(GB_SYSTEM_WINDOWS)
@@ -648,6 +649,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 
 	add_flag(&build_flags, BuildFlag_Sanitize,                str_lit("sanitize"),                  BuildFlagParam_String,  Command__does_build, true);
 	add_flag(&build_flags, BuildFlag_XRayInstrument,          str_lit("xray-instrument"),           BuildFlagParam_None,    Command__does_build);
+	add_flag(&build_flags, BuildFlag_XRayInstrumentPackages,  str_lit("xray-instrument-packages"),  BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_LTO,                     str_lit("lto"),                       BuildFlagParam_String,  Command__does_build);
 
 
@@ -1676,6 +1678,30 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_XRayInstrument:
 							GB_ASSERT(value.kind == ExactValue_Invalid);
 							build_context.xray_instrument = true;
+							break;
+
+						case BuildFlag_XRayInstrumentPackages:
+							{
+								// Opt-in allowlist (like -vet-packages): only XRay-instrument
+								// procedures in the listed packages. Implies -xray-instrument.
+								build_context.xray_instrument = true;
+								GB_ASSERT(value.kind == ExactValue_String);
+								String val = value.value_string;
+								String_Iterator it = {val, 0};
+								for (;;) {
+									String pkg = string_split_iterator(&it, ',');
+									if (pkg.len == 0) {
+										break;
+									}
+									pkg = string_trim_whitespace(pkg);
+									if (!string_is_valid_identifier(pkg)) {
+										gb_printf_err("-%.*s '%.*s' must be a valid identifier\n", LIT(name), LIT(pkg));
+										bad_flags = true;
+										continue;
+									}
+									string_set_add(&build_context.xray_instrument_packages, pkg);
+								}
+							}
 							break;
 
 						case BuildFlag_LTO:
@@ -3029,6 +3055,10 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		if (print_flag("-xray-instrument")) {
 			print_usage_line(2, "Generates LLVM XRay instrumentation sleds and links the XRay runtime.");
 		}
+		if (print_flag("-xray-instrument-packages:<comma-separated-strings>")) {
+			print_usage_line(2, "Only XRay-instrument procedures in the listed packages (implies -xray-instrument).");
+			print_usage_line(2, "Other packages become xray-never; @(xray_*) attributes still take precedence.");
+		}
 	}
 
 	if (doc) {
@@ -3819,6 +3849,7 @@ int main(int arg_count, char const **arg_ptr) {
 
 	string_set_init(&build_context.custom_attributes);
 	string_set_init(&build_context.vet_packages);
+	string_set_init(&build_context.xray_instrument_packages);
 
 	if (!parse_build_flags(args)) {
 		return 1;

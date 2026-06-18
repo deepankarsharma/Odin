@@ -399,6 +399,13 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 			lb_add_attribute_to_proc_with_string(m, p->value, str_lit("function-instrument"), str_lit("xray-always"));
 		} else if (entity->Procedure.xray_never_instrument) {
 			lb_add_attribute_to_proc_with_string(m, p->value, str_lit("function-instrument"), str_lit("xray-never"));
+		} else if (build_context.xray_instrument_packages.entries.count > 0) {
+			// Opt-in allowlist: fully instrument procs in listed packages, skip the rest.
+			if (entity->pkg != nullptr && string_set_exists(&build_context.xray_instrument_packages, entity->pkg->name)) {
+				lb_add_attribute_to_proc_with_string(m, p->value, str_lit("function-instrument"), str_lit("xray-always"));
+			} else {
+				lb_add_attribute_to_proc_with_string(m, p->value, str_lit("function-instrument"), str_lit("xray-never"));
+			}
 		} else {
 			lb_add_attribute_to_proc_with_string(m, p->value, str_lit("xray-instruction-threshold"), str_lit("200"));
 		}

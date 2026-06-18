@@ -500,6 +500,7 @@ struct BuildContext {
 	u64 vet_flags;
 	u32 sanitizer_flags;
 	bool xray_instrument;
+	StringSet xray_instrument_packages;
 	StringSet vet_packages;
 
 	bool   has_resource;
