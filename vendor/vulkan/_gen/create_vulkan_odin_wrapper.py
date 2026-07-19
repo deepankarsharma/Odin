@@ -846,6 +846,13 @@ def group_functions(f):
     f.write("load_proc_addresses_device_vtable :: proc(device: Device, vtable: ^Device_VTable) {\n")
     for name, vk_name in group_map["Device"]:
         k = max_len - len(name)
+        if name == "ProcGetDeviceProcAddr":
+            f.write('\tvtable.{}{} = {}\n'.format(
+                remove_prefix(name, 'Proc'),
+                "".ljust(k),
+                remove_prefix(name, 'Proc'),
+            ))
+            continue
         f.write('\tvtable.{}{} = auto_cast GetDeviceProcAddr(device, "vk{}")\n'.format(
             remove_prefix(name, 'Proc'),
             "".ljust(k),
@@ -856,6 +863,12 @@ def group_functions(f):
     f.write("load_proc_addresses_device :: proc(device: Device) {\n")
     max_len = max(len(name) for name, _ in group_map["Device"])
     for name, vk_name in group_map["Device"]:
+        # GetDeviceProcAddr is loaded through GetInstanceProcAddr with the
+        # other device procedures. Preserve that bootstrap pointer instead of
+        # asking it for itself: older loaders may return nil for the redundant
+        # self-query even though the original pointer is usable.
+        if name == "ProcGetDeviceProcAddr":
+            continue
         k = max_len - len(name)
         f.write('\t{}{} = auto_cast GetDeviceProcAddr(device, "vk{}")\n'.format(
             remove_prefix(name, 'Proc'),
@@ -888,6 +901,11 @@ def group_functions(f):
     f.write("\tGetInstanceProcAddr = auto_cast vk_get_instance_proc_addr\n\n")
     max_len = max(len(name) for name, _ in group_map["Loader"])
     for name, vk_name in group_map["Loader"]:
+        # The caller obtained GetInstanceProcAddr from the platform loader.
+        # Keep that canonical bootstrap pointer instead of overwriting it with
+        # the result of asking it for itself.
+        if name == "ProcGetInstanceProcAddr":
+            continue
         k = max_len - len(name)
         f.write('\t{}{} = auto_cast GetInstanceProcAddr(nil, "vk{}")\n'.format(
             remove_prefix(name, 'Proc'),

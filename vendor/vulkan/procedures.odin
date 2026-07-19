@@ -3685,7 +3685,7 @@ load_proc_addresses_device_vtable :: proc(device: Device, vtable: ^Device_VTable
 	vtable.GetDeviceMemoryOpaqueCaptureAddress                    = auto_cast GetDeviceProcAddr(device, "vkGetDeviceMemoryOpaqueCaptureAddress")
 	vtable.GetDeviceMemoryOpaqueCaptureAddressKHR                 = auto_cast GetDeviceProcAddr(device, "vkGetDeviceMemoryOpaqueCaptureAddressKHR")
 	vtable.GetDeviceMicromapCompatibilityEXT                      = auto_cast GetDeviceProcAddr(device, "vkGetDeviceMicromapCompatibilityEXT")
-	vtable.GetDeviceProcAddr                                      = auto_cast GetDeviceProcAddr(device, "vkGetDeviceProcAddr")
+	vtable.GetDeviceProcAddr                                      = GetDeviceProcAddr
 	vtable.GetDeviceQueue                                         = auto_cast GetDeviceProcAddr(device, "vkGetDeviceQueue")
 	vtable.GetDeviceQueue2                                        = auto_cast GetDeviceProcAddr(device, "vkGetDeviceQueue2")
 	vtable.GetDeviceSubpassShadingMaxWorkgroupSizeHUAWEI          = auto_cast GetDeviceProcAddr(device, "vkGetDeviceSubpassShadingMaxWorkgroupSizeHUAWEI")
@@ -4384,7 +4384,6 @@ load_proc_addresses_device :: proc(device: Device) {
 	GetDeviceMemoryOpaqueCaptureAddress                    = auto_cast GetDeviceProcAddr(device, "vkGetDeviceMemoryOpaqueCaptureAddress")
 	GetDeviceMemoryOpaqueCaptureAddressKHR                 = auto_cast GetDeviceProcAddr(device, "vkGetDeviceMemoryOpaqueCaptureAddressKHR")
 	GetDeviceMicromapCompatibilityEXT                      = auto_cast GetDeviceProcAddr(device, "vkGetDeviceMicromapCompatibilityEXT")
-	GetDeviceProcAddr                                      = auto_cast GetDeviceProcAddr(device, "vkGetDeviceProcAddr")
 	GetDeviceQueue                                         = auto_cast GetDeviceProcAddr(device, "vkGetDeviceQueue")
 	GetDeviceQueue2                                        = auto_cast GetDeviceProcAddr(device, "vkGetDeviceQueue2")
 	GetDeviceSubpassShadingMaxWorkgroupSizeHUAWEI          = auto_cast GetDeviceProcAddr(device, "vkGetDeviceSubpassShadingMaxWorkgroupSizeHUAWEI")
@@ -5374,7 +5373,6 @@ load_proc_addresses_global :: proc(vk_get_instance_proc_addr: rawptr) {
 	EnumerateInstanceLayerProperties     = auto_cast GetInstanceProcAddr(nil, "vkEnumerateInstanceLayerProperties")
 	EnumerateInstanceVersion             = auto_cast GetInstanceProcAddr(nil, "vkEnumerateInstanceVersion")
 	GetExternalComputeQueueDataNV        = auto_cast GetInstanceProcAddr(nil, "vkGetExternalComputeQueueDataNV")
-	GetInstanceProcAddr                  = auto_cast GetInstanceProcAddr(nil, "vkGetInstanceProcAddr")
 }
 
 load_proc_addresses :: proc{
