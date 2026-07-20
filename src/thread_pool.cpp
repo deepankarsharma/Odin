@@ -1,14 +1,24 @@
 // thread_pool.cpp
 
-// TODO(bill): make work on MSVC
-// #if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
-// #include <sanitizer/tsan_interface.h>
-// #define TSAN_RELEASE(addr) __tsan_release(addr)
-// #define TSAN_ACQUIRE(addr) __tsan_acquire(addr)
-// #else
-#define TSAN_RELEASE(addr)
-#define TSAN_ACQUIRE(addr)
-// #endif
+// Model publication of task slots in the work-stealing queue for TSan. The
+// queue's atomic fences provide the real synchronization.
+#if defined(__has_feature)
+	#if __has_feature(thread_sanitizer)
+		#define ODIN_THREAD_SANITIZER
+	#endif
+#endif
+#if defined(__SANITIZE_THREAD__) && !defined(ODIN_THREAD_SANITIZER)
+	#define ODIN_THREAD_SANITIZER
+#endif
+
+#if defined(ODIN_THREAD_SANITIZER)
+	#include <sanitizer/tsan_interface.h>
+	#define TSAN_RELEASE(addr) __tsan_release(addr)
+	#define TSAN_ACQUIRE(addr) __tsan_acquire(addr)
+#else
+	#define TSAN_RELEASE(addr)
+	#define TSAN_ACQUIRE(addr)
+#endif
 
 struct WorkerTask;
 struct ThreadPool;
@@ -98,7 +108,7 @@ void thread_pool_queue_push(Thread *thread, WorkerTask task) {
 	}
 
 	cur_ring->buffer[bot % cur_ring->size] = task;
-	TSAN_RELEASE(cur_ring->buffer[bot % cur_ring->size]);
+	TSAN_RELEASE(&cur_ring->buffer[bot % cur_ring->size]);
 	std::atomic_thread_fence(std::memory_order_release);
 	thread->queue.bottom.store(bot + 1, std::memory_order_relaxed);
 
@@ -119,7 +129,7 @@ GrabState thread_pool_queue_take(Thread *thread, WorkerTask *task) {
 	if (top <= bot) {
 
 		// Queue is not empty
-		TSAN_ACQUIRE(cur_ring->buffer[bot % cur_ring->size]);
+		TSAN_ACQUIRE(&cur_ring->buffer[bot % cur_ring->size]);
 		*task = cur_ring->buffer[bot % cur_ring->size];
 		if (top == bot) {
 			// Only one entry left in queue
@@ -260,4 +270,3 @@ gb_internal THREAD_PROC(thread_pool_thread_proc) {
 
 	return 0;
 }
-

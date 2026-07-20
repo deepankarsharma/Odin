@@ -23,3 +23,6 @@ release_native:
 
 nightly:
 	./build_odin.sh nightly
+
+tsan:
+	./build_odin.sh tsan
