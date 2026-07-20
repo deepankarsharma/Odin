@@ -142,6 +142,9 @@ build_odin() {
 	nightly)
 		EXTRAFLAGS="-DNIGHTLY -O3"
 		;;
+	tsan)
+		EXTRAFLAGS="-g -O1 -fsanitize=thread -fno-omit-frame-pointer"
+		;;
 	*)
 		error "Build mode \"$1\" unsupported!"
 		;;

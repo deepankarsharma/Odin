@@ -289,8 +289,11 @@ test_futex :: proc(t: ^testing.T) {
 	p :: proc(th: ^thread.Thread) {
 		data := cast(^Data)th.data
 
-		// log.debugf("FUTEX-%v> waiting", th.id)
-		sync.futex_wait(&data.f, 3)
+		// Futex waits may wake spuriously, so always recheck the value.
+		for intrinsics.atomic_load(&data.f) == sync.Futex(3) {
+			// log.debugf("FUTEX-%v> waiting", th.id)
+			sync.futex_wait(&data.f, 3)
+		}
 		// log.debugf("FUTEX-%v> done", th.id)
 
 		n := data.i
@@ -311,7 +314,7 @@ test_futex :: proc(t: ^testing.T) {
 
 	data.i = 1
 	// Change the futex variable to keep late-starters from stalling.
-	data.f = 0
+	intrinsics.atomic_store(&data.f, sync.Futex(0))
 	sync.futex_broadcast(&data.f)
 
 	wait_for(threads[:])
