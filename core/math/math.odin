@@ -388,11 +388,11 @@ tan :: proc{
 	tan_f64, tan_f64le, tan_f64be,
 }
 
-@(require_results) lerp :: proc "contextless" (a, b: $T, t: $E) -> (x: T) { return a*(1-t) + b*t }
-@(require_results) saturate :: proc "contextless" (a: $T) -> (x: T) { return clamp(a, 0, 1) }
+@(require_results) lerp     :: #force_inline proc "contextless" (a, b: $T, t: $E) -> (x: T) { return a*(1-t) + b*t }
+@(require_results) saturate :: #force_inline proc "contextless" (a: $T) -> (x: T) { return clamp(a, 0, 1) }
 
 @(require_results)
-unlerp :: proc "contextless" (a, b, x: $T) -> (t: T) where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+unlerp :: #force_inline proc "contextless" (a, b, x: $T) -> (t: T) where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
 	return (x-a)/(b-a)
 }
 
@@ -424,7 +424,6 @@ wrap :: proc "contextless" (x, y: $T) -> T where intrinsics.type_is_numeric(T), 
 }
 @(require_results)
 angle_diff :: proc "contextless" (a, b: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
-
 	dist := wrap(b - a, TAU)
 	return wrap(dist*2, TAU) - dist
 }
@@ -1613,17 +1612,11 @@ is_power_of_two :: proc "contextless" (x: int) -> bool {
 
 @(require_results)
 next_power_of_two :: proc "contextless" (x: int) -> int {
-	k := x -1
-	when size_of(int) == 8 {
-		k = k | (k >> 32)
+	if x <= 1 {
+		return 1
 	}
-	k = k | (k >> 16)
-	k = k | (k >> 8)
-	k = k | (k >> 4)
-	k = k | (k >> 2)
-	k = k | (k >> 1)
-	k += 1 + int(x <= 0)
-	return k
+	n := uint(size_of(x) * 8) - uint(intrinsics.count_leading_zeros(uint(x) - 1))
+	return int(1) << n
 }
 
 @(require_results)

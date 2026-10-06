@@ -255,11 +255,10 @@ alignment is not specified explicitly.
 DEFAULT_ALIGNMENT :: 2*align_of(rawptr)
 
 /*
-Default page size.
-
-This value is the default page size for the current platform.
+On platforms where we were able to query a configurable size, we use that value instead.
+See `query_page_size_init()`
 */
-DEFAULT_PAGE_SIZE ::
+PAGE_SIZE: int =
 	64 * 1024 when ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32 else
 	16 * 1024 when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 else
 	4 * 1024
@@ -1025,7 +1024,7 @@ make_multi_pointer :: proc(
 	$T: typeid/[^]$E,
 	#any_int len: int,
 	allocator := context.allocator,
-	loc := #caller_location
+	loc := #caller_location,
 ) -> (mp: T, err: Allocator_Error) {
 	return runtime.make_multi_pointer(T, len, allocator, loc)
 }
@@ -1041,7 +1040,7 @@ make_soa_slice :: proc(
 	$T: typeid/#soa[]$E,
 	#any_int len: int,
 	allocator := context.allocator,
-	loc := #caller_location
+	loc := #caller_location,
 ) -> (array: T, err: Allocator_Error) {
 	return runtime.make_soa_slice(T, len, allocator, loc)
 }
@@ -1056,7 +1055,7 @@ its backing allocator, and initial length and capacity of `0`.
 make_soa_dynamic_array :: proc(
 	$T: typeid/#soa[dynamic]$E,
 	allocator := context.allocator,
-	loc := #caller_location
+	loc := #caller_location,
 ) -> (array: T, err: Allocator_Error) {
 	return runtime.make_soa_dynamic_array(T, allocator, loc)
 }
@@ -1072,7 +1071,7 @@ make_soa_dynamic_array_len :: proc(
 	$T: typeid/#soa[dynamic]$E,
 	#any_int len: int,
 	allocator := context.allocator,
-	loc := #caller_location
+	loc := #caller_location,
 ) -> (array: T, err: Allocator_Error) {
 	return runtime.make_soa_dynamic_array_len(T, len, allocator, loc)
 }
@@ -1090,7 +1089,7 @@ make_soa_dynamic_array_len_cap :: proc(
 	#any_int len: int,
 	#any_int cap: int,
 	allocator := context.allocator,
-	loc := #caller_location
+	loc := #caller_location,
 ) -> (array: T, err: Allocator_Error) {
 	return runtime.make_soa_dynamic_array_len_cap(T, len, cap, allocator, loc)
 }

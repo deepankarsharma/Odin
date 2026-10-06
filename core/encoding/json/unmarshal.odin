@@ -358,7 +358,6 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 	return false, nil
 }
 
-@(private)
 unmarshal_value :: proc(p: ^Parser, v: any) -> (err: Unmarshal_Error) {
 	UNSUPPORTED_TYPE := Unsupported_Type_Error{v.id, p.curr_token}
 	token := p.curr_token
@@ -635,7 +634,7 @@ unmarshal_object :: proc(p: ^Parser, v: any, end_token: Token_Kind) -> (err: Unm
 				defer p.allocator = allocator
 				p.allocator = mem.nil_allocator()
 
-				parse_value(p) or_return
+				_ = parse_value(p) or_return
 				if parse_comma(p) {
 					break struct_loop
 				}

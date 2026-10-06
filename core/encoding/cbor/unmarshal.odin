@@ -509,7 +509,7 @@ _unmarshal_array :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header
 	case reflect.Type_Info_Slice:
 		length, scap := err_conv(_decode_len_container(d, add)) or_return
 
-		data := mem.alloc_bytes_non_zeroed(t.elem.size * scap, t.elem.align, allocator=allocator, loc=loc) or_return
+		data := mem.alloc_bytes(t.elem.size * scap, t.elem.align, allocator=allocator, loc=loc) or_return
 		defer if err != nil { mem.free_bytes(data, allocator=allocator, loc=loc) }
 
 		da := mem.Raw_Dynamic_Array{raw_data(data), 0, scap, context.allocator }
@@ -529,7 +529,7 @@ _unmarshal_array :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header
 	case reflect.Type_Info_Dynamic_Array:
 		length, scap := err_conv(_decode_len_container(d, add)) or_return
 
-		data := mem.alloc_bytes_non_zeroed(t.elem.size * scap, t.elem.align, loc=loc) or_return
+		data := mem.alloc_bytes(t.elem.size * scap, t.elem.align, loc=loc) or_return
 		defer if err != nil { mem.free_bytes(data, allocator=allocator, loc=loc) }
 
 		raw           := (^mem.Raw_Dynamic_Array)(v.data)
@@ -905,7 +905,7 @@ _assign_int :: proc(val: any, i: $T) -> bool {
 	case:
 		ti := type_info_of(v.id)
 		if _, ok := ti.variant.(runtime.Type_Info_Bit_Set); ok {
-			do_byte_swap := !reflect.bit_set_is_big_endian(v)
+			do_byte_swap := reflect.bit_set_is_big_endian(v) != (ODIN_ENDIAN == .Big)
 			switch ti.size * 8 {
 			case 0: // no-op.
 			case 8:

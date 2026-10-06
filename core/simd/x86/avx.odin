@@ -200,9 +200,7 @@ _mm256_div_pd :: #force_inline proc "c" (a, b: __m256d) -> __m256d {
 // - `0x02`: Round up, toward positive infinity.
 // - `0x03`: Truncate the values.
 //
-// For a complete list of options, check [the LLVM docs][llvm_docs].
-//
-// [llvm_docs]: https://github.com/llvm-mirror/clang/blob/dcd8d797b20291f1a6b3e0ddda085aa2bbb382a8/lib/Headers/avxintrin.h#L382
+// For a complete list of options, check [the LLVM docs](https://github.com/llvm-mirror/clang/blob/dcd8d797b20291f1a6b3e0ddda085aa2bbb382a8/lib/Headers/avxintrin.h#L382).
 //
 // [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_round_pd)
 @(require_results, enable_target_feature="avx")
@@ -234,9 +232,7 @@ _mm256_floor_pd :: #force_inline proc "c" (a: __m256d) -> __m256d {
 // - `0x02`: Round up, toward positive infinity.
 // - `0x03`: Truncate the values.
 //
-// For a complete list of options, check [the LLVM docs][llvm_docs].
-//
-// [llvm_docs]: https://github.com/llvm-mirror/clang/blob/dcd8d797b20291f1a6b3e0ddda085aa2bbb382a8/lib/Headers/avxintrin.h#L382
+// For a complete list of options, check [the LLVM docs](https://github.com/llvm-mirror/clang/blob/dcd8d797b20291f1a6b3e0ddda085aa2bbb382a8/lib/Headers/avxintrin.h#L382).
 //
 // [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_round_ps)
 @(require_results, enable_target_feature="avx")
@@ -744,11 +740,11 @@ _mm256_permute2f128_si256 :: #force_inline proc "c" (a, b: __m256i, $IMM8: u8) -
 		r,
 		__m256i(0),
 
-		4 if ((IMM8 & 0xf) & 0b1000) != 0 else 0,
-		4 if ((IMM8 & 0xf) & 0b1000) != 0 else 1,
+		4 when ((IMM8 & 0xf) & 0b1000) != 0 else 0,
+		4 when ((IMM8 & 0xf) & 0b1000) != 0 else 1,
 
-		4 if (((IMM8 & 0xf0)>>4) & 0b1000) != 0 else 2,
-		4 if (((IMM8 & 0xf0)>>4) & 0b1000) != 0 else 3,
+		4 when (((IMM8 & 0xf0)>>4) & 0b1000) != 0 else 2,
+		4 when (((IMM8 & 0xf0)>>4) & 0b1000) != 0 else 3,
 	)
 }
 

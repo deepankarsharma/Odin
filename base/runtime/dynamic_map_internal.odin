@@ -1,3 +1,4 @@
+#+build !bedrock
 package runtime
 
 import "base:intrinsics"
@@ -47,94 +48,50 @@ MAP_MIN_LOG2_CAPACITY :: 3 // 8 elements
 // Has to be less than 100% though.
 #assert(MAP_LOAD_FACTOR < 100)
 
-// This is safe to change. The log2 size of a cache-line. At minimum it has to
-// be six though. Higher cache line sizes are permitted.
-MAP_CACHE_LINE_LOG2 :: 6
-
-// The size of a cache-line.
-MAP_CACHE_LINE_SIZE :: 1 << MAP_CACHE_LINE_LOG2
-
-// The minimum cache-line size allowed by this implementation is 64 bytes since
-// we need 6 bits in the base pointer to store the integer log2 capacity, which
-// at maximum is 63. Odin uses signed integers to represent length and capacity,
-// so only 63 bits are needed in the maximum case.
-#assert(MAP_CACHE_LINE_SIZE >= 64)
-
-// Map_Cell type that packs multiple T in such a way to ensure that each T stays
-// aligned by align_of(T) and such that align_of(Map_Cell(T)) % MAP_CACHE_LINE_SIZE == 0
-//
-// This means a value of type T will never straddle a cache-line.
-//
-// When multiple Ts can fit in a single cache-line the data array will have more
-// than one element. When it cannot, the data array will have one element and
-// an array of Map_Cell(T) will be padded to stay a multiple of MAP_CACHE_LINE_SIZE.
-//
-// We rely on the type system to do all the arithmetic and padding for us here.
-//
-// The usual array[index] indexing for []T backed by a []Map_Cell(T) becomes a bit
-// more involved as there now may be internal padding. The indexing now becomes
-//
-//  N :: len(Map_Cell(T){}.data)
-//  i := index / N
-//  j := index % N
-//  cell[i].data[j]
-//
-// However, since len(Map_Cell(T){}.data) is a compile-time constant, there are some
-// optimizations we can do to eliminate the need for any divisions as N will
-// be bounded by [1, 64).
-//
-// In the optimal case, len(Map_Cell(T){}.data) = 1 so the cell array can be treated
-// as a regular array of T, which is the case for hashes.
-Map_Cell :: struct($T: typeid) #align(MAP_CACHE_LINE_SIZE) {
-	data: [MAP_CACHE_LINE_SIZE / size_of(T) when 0 < size_of(T) && size_of(T) < MAP_CACHE_LINE_SIZE else 1]T,
-}
-
-// So we can operate on a cell data structure at runtime without any type
-// information, we have a simple table that stores some traits about the cell.
-//
-// 32-bytes on 64-bit
-// 16-bytes on 32-bit
-Map_Cell_Info :: struct {
-	size_of_type:      uintptr, // 8-bytes on 64-bit, 4-bytes on 32-bits
-	align_of_type:     uintptr, // 8-bytes on 64-bit, 4-bytes on 32-bits
-	size_of_cell:      uintptr, // 8-bytes on 64-bit, 4-bytes on 32-bits
-	elements_per_cell: uintptr, // 8-bytes on 64-bit, 4-bytes on 32-bits
-}
-
 // map_cell_info :: proc "contextless" ($T: typeid) -> ^Map_Cell_Info {...}
 map_cell_info :: intrinsics.type_map_cell_info
 
 // Same as the above procedure but at runtime with the cell Map_Cell_Info value.
 @(require_results)
-map_cell_index_dynamic :: #force_inline proc "contextless" (base: uintptr, #no_alias info: ^Map_Cell_Info, index: uintptr) -> uintptr {
-	// Micro-optimize the common cases to save on integer division.
-	elements_per_cell := uintptr(info.elements_per_cell)
-	size_of_cell      := uintptr(info.size_of_cell)
-	switch elements_per_cell {
-	case 1:
-		return base + (index * size_of_cell)
-	case 2:
-		cell_index   := index >> 1
-		data_index   := index & 1
-		size_of_type := uintptr(info.size_of_type)
-		return base + (cell_index * size_of_cell) + (data_index * size_of_type)
-	case:
-		cell_index   := index / elements_per_cell
-		data_index   := index % elements_per_cell
-		size_of_type := uintptr(info.size_of_type)
-		return base + (cell_index * size_of_cell) + (data_index * size_of_type)
-	}
-}
+map_cell_index_dynamic :: #force_inline proc "contextless" (base: uintptr, #no_alias info: ^Map_Cell_Info, index: uintptr) -> uintptr #no_bounds_check {
+	#assert(MAP_CACHE_LINE_SIZE == 64)
 
-// Same as above procedure but with compile-time constant index.
-@(require_results)
-map_cell_index_dynamic_const :: proc "contextless" (base: uintptr, #no_alias info: ^Map_Cell_Info, $INDEX: uintptr) -> uintptr {
-	elements_per_cell := uintptr(info.elements_per_cell)
-	size_of_cell      := uintptr(info.size_of_cell)
-	size_of_type      := uintptr(info.size_of_type)
-	cell_index        := INDEX / elements_per_cell
-	data_index        := INDEX % elements_per_cell
-	return base + (cell_index * size_of_cell) + (data_index * size_of_type)
+	// ceil(2^64 / N) for each N = MAP_CACHE_LINE_SIZE / size_of(T) > 1
+	@(static, rodata)
+	MAP_CELL_RECIPROCALS := [MAP_CACHE_LINE_SIZE+1]u64{
+		2  = (1<<64 +  1) /  2,
+		3  = (1<<64 +  2) /  3,
+		4  = (1<<64 +  3) /  4,
+		5  = (1<<64 +  4) /  5,
+		6  = (1<<64 +  5) /  6,
+		7  = (1<<64 +  6) /  7,
+		8  = (1<<64 +  7) /  8,
+		9  = (1<<64 +  8) /  9,
+		10 = (1<<64 +  9) / 10,
+		12 = (1<<64 + 11) / 12,
+		16 = (1<<64 + 15) / 16,
+		21 = (1<<64 + 20) / 21,
+		32 = (1<<64 + 31) / 32,
+		64 = (1<<64 + 63) / 64,
+	}
+
+	// cell_index*size_of_cell + data_index*size_of_type == index*size_of_type + cell_index*padding
+
+	n       := info.elements_per_cell
+	stride  := info.size_of_cell if n == 1 else info.size_of_type
+	padding := info.size_of_cell - n*stride
+	offset  := index*stride
+	if padding != 0 {
+		r := MAP_CELL_RECIPROCALS[n]
+		when size_of(uintptr) == 8 {
+			cell_index := uintptr((u128(index)*u128(r)) >> 64) // NOTE(bill): on many platforms, this use of `u128` is actually a single instruction
+		} else {
+			lo := u64(index)*(r & 0xffff_ffff)
+			cell_index := uintptr((u64(index)*(r >> 32) + (lo >> 32)) >> 32)
+		}
+		offset += cell_index*padding
+	}
+	return base + offset
 }
 
 // We always round the capacity to a power of two so this becomes [16]Foo, which
@@ -226,8 +183,6 @@ map_data :: #force_inline proc "contextless" (m: Raw_Map) -> uintptr {
 }
 
 
-Map_Hash :: uintptr
-
 TOMBSTONE_MASK :: 1<<(size_of(Map_Hash)*8 - 1)
 
 // Procedure to check if a slot is empty for a given hash. This is represented
@@ -239,7 +194,7 @@ map_hash_is_empty :: #force_inline proc "contextless" (hash: Map_Hash) -> bool {
 }
 
 @(require_results)
-map_hash_is_deleted :: #force_no_inline proc "contextless" (hash: Map_Hash) -> bool {
+map_hash_is_deleted :: #force_inline proc "contextless" (hash: Map_Hash) -> bool {
 	// The MSB indicates a tombstone
 	return hash & TOMBSTONE_MASK != 0
 }
@@ -254,19 +209,14 @@ map_seed :: #force_inline proc "contextless" (m: Raw_Map) -> uintptr {
 	return map_seed_from_map_data(map_data(m))
 }
 
-// splitmix for uintptr
 @(require_results)
 map_seed_from_map_data :: #force_inline proc "contextless" (data: uintptr) -> uintptr {
 	when size_of(uintptr) == size_of(u64) {
-		mix := data + 0x9e3779b97f4a7c15
-		mix = (mix ~ (mix >> 30)) * 0xbf58476d1ce4e5b9
-		mix = (mix ~ (mix >> 27)) * 0x94d049bb133111eb
-		return mix ~ (mix >> 31)
+		p := u128(data) * 0x94d049bb133111eb
+		return uintptr(p) ~ uintptr(p >> 64)
 	} else {
-		mix := data + 0x9e3779b9
-		mix = (mix ~ (mix >> 16)) * 0x21f0aaad
-		mix = (mix ~ (mix >> 15)) * 0x735a2d97
-		return mix ~ (mix >> 15)
+		p := u64(data) * 0x735a2d97
+		return uintptr(p) ~ uintptr(p >> 32)
 	}
 }
 
@@ -288,23 +238,6 @@ map_probe_distance :: #force_inline proc "contextless" (m: Raw_Map, hash: Map_Ha
 	return (slot - uintptr(hash)) & (capacity - 1) // NOTE(bill): this is equivalent to the above, but less operations
 }
 
-// When working with the type-erased structure at runtime we need information
-// about the map to make working with it possible. This info structure stores
-// that.
-//
-// `Map_Info` and `Map_Cell_Info` are read only data structures and cannot be
-// modified after creation
-//
-// 32-bytes on 64-bit
-// 16-bytes on 32-bit
-Map_Info :: struct {
-	ks: ^Map_Cell_Info, // 8-bytes on 64-bit, 4-bytes on 32-bit
-	vs: ^Map_Cell_Info, // 8-bytes on 64-bit, 4-bytes on 32-bit
-	key_hasher: proc "contextless" (key: rawptr, seed: Map_Hash) -> Map_Hash, // 8-bytes on 64-bit, 4-bytes on 32-bit
-	key_equal:  proc "contextless" (lhs, rhs: rawptr) -> bool,                // 8-bytes on 64-bit, 4-bytes on 32-bit
-}
-
-
 // The Map_Info structure is basically a pseudo-table of information for a given K and V pair.
 // map_info :: proc "contextless" ($T: typeid/map[$K]$V) -> ^Map_Info {...}
 map_info :: intrinsics.type_map_info
@@ -320,7 +253,7 @@ map_kvh_data_dynamic :: proc "contextless" (m: Raw_Map, #no_alias info: ^Map_Inf
 	sk   = map_cell_index_dynamic(hs_, INFO_HS, capacity) // Skip past hs to get start of sk
 	// Need to skip past two elements in the scratch key space to get to the start
 	// of the scratch value space, of which there's only two elements as well.
-	sv = map_cell_index_dynamic_const(sk, info.ks, 2)
+	sv = map_cell_index_dynamic(sk, info.ks, 2)
 
 	hs = ([^]Map_Hash)(hs_)
 	return
@@ -369,7 +302,8 @@ map_alloc_dynamic :: proc "odin" (info: ^Map_Info, log2_capacity: uintptr, alloc
 		return {}, .Out_Of_Memory
 	}
 
-	capacity := uintptr(1) << max(log2_capacity, MAP_MIN_LOG2_CAPACITY)
+	new_log2_capacity := max(log2_capacity, MAP_MIN_LOG2_CAPACITY)
+	capacity := uintptr(1) << new_log2_capacity
 
 	CACHE_MASK :: MAP_CACHE_LINE_SIZE - 1
 
@@ -384,7 +318,7 @@ map_alloc_dynamic :: proc "odin" (info: ^Map_Info, log2_capacity: uintptr, alloc
 	if intrinsics.expect(data_ptr & CACHE_MASK != 0, false) {
 		panic("allocation not aligned to a cache line", loc)
 	} else {
-		result.data = data_ptr | log2_capacity // Tagged pointer representation for capacity.
+		result.data = data_ptr | new_log2_capacity // Tagged pointer representation for capacity.
 		result.len = 0
 
 		map_clear_dynamic(&result, info)
@@ -595,15 +529,6 @@ map_grow_dynamic :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Inf
 
 @(require_results)
 map_reserve_dynamic :: #force_no_inline proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, new_capacity: uintptr, loc := #caller_location) -> Allocator_Error {
-	@(require_results)
-	ceil_log2 :: #force_inline proc "contextless" (x: uintptr) -> uintptr {
-		z := intrinsics.count_leading_zeros(x)
-		if z > 0 && x & (x-1) != 0 {
-			z -= 1
-		}
-		return size_of(uintptr)*8 - 1 - z
-	}
-
 	if m.allocator.procedure == nil {
 		m.allocator = context.allocator
 	}
@@ -616,7 +541,7 @@ map_reserve_dynamic :: #force_no_inline proc "odin" (#no_alias m: ^Raw_Map, #no_
 	}
 
 	// ceiling nearest power of two
-	log2_new_capacity := ceil_log2(new_capacity)
+	log2_new_capacity := __ceil_log2(new_capacity)
 
 	log2_min_cap := max(MAP_MIN_LOG2_CAPACITY, log2_new_capacity)
 
@@ -626,34 +551,55 @@ map_reserve_dynamic :: #force_no_inline proc "odin" (#no_alias m: ^Raw_Map, #no_
 	}
 
 	resized := map_alloc_dynamic(info, log2_min_cap, m.allocator, loc) or_return
-
-	ks, vs, hs, _, _ := map_kvh_data_dynamic(m^, info)
-
-	// Cache these loads to avoid hitting them in the for loop.
-	n := m.len
-	for i in 0..<old_capacity {
-		hash := hs[i]
-		if map_hash_is_empty(hash) {
-			continue
-		}
-		if map_hash_is_deleted(hash) {
-			continue
-		}
-		k := map_cell_index_dynamic(ks, info.ks, i)
-		v := map_cell_index_dynamic(vs, info.vs, i)
-		hash = info.key_hasher(rawptr(k), map_seed(resized))
-		_ = map_insert_hash_dynamic(&resized, info, hash, k, v)
-		// Only need to do this comparison on each actually added pair, so do not
-		// fold it into the for loop comparator as a micro-optimization.
-		n -= 1
-		if n == 0 {
-			break
-		}
-	}
+	map_rehash_dynamic(m^, &resized, info)
 
 	map_free_dynamic(m^, info, loc) or_return
 	m.data = resized.data
 	return nil
+}
+
+// NOTE(bill): `dst` must be newly allocated, as it is assumed to have no tombstones
+map_rehash_dynamic :: proc "odin" (src: Raw_Map, #no_alias dst: ^Raw_Map, #no_alias info: ^Map_Info) {
+	ks, vs, hs, _, _ := map_kvh_data_dynamic(src, info)
+	dks, dvs, dhs, _, _ := map_kvh_data_dynamic(dst^, info)
+	mask := (uintptr(1) << map_log2_cap(dst^)) - 1
+	seed := map_seed(dst^)
+	size_of_k := info.ks.size_of_type
+	size_of_v := info.vs.size_of_type
+
+	n := src.len
+	for i in 0..<uintptr(1) << map_log2_cap(src) {
+		if n == 0 {
+			break
+		}
+		if !map_hash_is_valid(hs[i]) {
+			continue
+		}
+		n -= 1
+
+		k := map_cell_index_dynamic(ks, info.ks, i)
+		v := map_cell_index_dynamic(vs, info.vs, i)
+		h := info.key_hasher(rawptr(k), seed)
+
+		pos := h & mask
+		distance := uintptr(0)
+		for {
+			element_hash := dhs[pos]
+			if map_hash_is_empty(element_hash) || distance > map_probe_distance(dst^, element_hash, pos) {
+				break
+			}
+			pos = (pos + 1) & mask
+			distance += 1
+		}
+
+		if map_hash_is_empty(dhs[pos]) {
+			intrinsics.mem_copy_non_overlapping(rawptr(map_cell_index_dynamic(dks, info.ks, pos)), rawptr(k), size_of_k)
+			intrinsics.mem_copy_non_overlapping(rawptr(map_cell_index_dynamic(dvs, info.vs, pos)), rawptr(v), size_of_v)
+			dhs[pos] = h
+		} else {
+			_ = map_insert_hash_dynamic(dst, info, h, k, v)
+		}
+	}
 }
 
 
@@ -663,41 +609,30 @@ map_shrink_dynamic :: #force_no_inline proc "odin" (#no_alias m: ^Raw_Map, #no_a
 		m.allocator = context.allocator
 	}
 
-	// Cannot shrink the capacity if the number of items in the map would exceed
-	// one minus the current log2 capacity's resize threshold. That is the shrunk
-	// map needs to be within the max load factor.
-	log2_capacity := map_log2_cap(m^)
-	if uintptr(m.len) >= map_load_factor(log2_capacity - 1) {
+	// Don't shrink below the minimum.
+	log2_capacity_current := map_log2_cap(m^)
+	if log2_capacity_current <= MAP_MIN_LOG2_CAPACITY {
 		return false, nil
 	}
 
-	shrunk := map_alloc_dynamic(info, log2_capacity - 1, m.allocator) or_return
-
-	capacity := uintptr(1) << log2_capacity
-
-	ks, vs, hs, _, _ := map_kvh_data_dynamic(m^, info)
-
-	n := m.len
-	for i in 0..<capacity {
-		hash := hs[i]
-		if map_hash_is_empty(hash) {
-			continue
-		}
-		if map_hash_is_deleted(hash) {
-			continue
-		}
-
-		k := map_cell_index_dynamic(ks, info.ks, i)
-		v := map_cell_index_dynamic(vs, info.vs, i)
-		hash = info.key_hasher(rawptr(k), map_seed(shrunk))
-		_ = map_insert_hash_dynamic(&shrunk, info, hash, k, v)
-		// Only need to do this comparison on each actually added pair, so do not
-		// fold it into the for loop comparator as a micro-optimization.
-		n -= 1
-		if n == 0 {
-			break
-		}
+	// Cannot shrink the capacity if the number of items in the map would exceed
+	// one minus the current log2 capacity's resize threshold. That is the shrunk
+	// map needs to be within the max load factor.
+	load_factor_new_max := map_load_factor(log2_capacity_current - 1)
+	if m.len >= load_factor_new_max {
+		return false, nil
 	}
+
+	log2_capacity_new := max(__ceil_log2(m.len), MAP_MIN_LOG2_CAPACITY)
+	load_factor_new := map_load_factor(log2_capacity_new)
+
+	// The new log2 capacity's load factor needs to contain the current map as well.
+	if m.len > load_factor_new {
+		log2_capacity_new += 1
+	}
+
+	shrunk := map_alloc_dynamic(info, log2_capacity_new, m.allocator) or_return
+	map_rehash_dynamic(m^, &shrunk, info)
 
 	map_free_dynamic(m^, info, loc) or_return
 	m.data = shrunk.data
@@ -739,6 +674,33 @@ map_lookup_dynamic :: #force_no_inline proc "contextless" (m: Raw_Map, #no_alias
 		d += 1
 	}
 }
+
+@(require_results)
+map_lookup_static :: #force_inline proc "contextless" (m: $T/map[$K]$V, key: ^K) -> (index: uintptr, ok: bool) {
+	rm := transmute(Raw_Map)m
+	if rm.len == 0 {
+		return
+	}
+	info := intrinsics.type_map_info(T)
+	h := info.key_hasher(key, map_seed(rm))
+	pos := map_desired_position(rm, h)
+	distance := uintptr(0)
+	mask := (uintptr(1) << map_log2_cap(rm)) - 1
+	ks, _, hs := map_kvh_data_static(m)
+	for {
+		element_hash := hs[pos]
+		if map_hash_is_empty(element_hash) {
+			return
+		} else if distance > map_probe_distance(rm, element_hash, pos) {
+			return
+		} else if element_hash == h && info.key_equal(key, rawptr(map_cell_index_static(ks, pos))) {
+			return pos, true
+		}
+		pos = (pos + 1) & mask
+		distance += 1
+	}
+}
+
 @(require_results)
 map_exists_dynamic :: #force_no_inline proc "contextless" (m: Raw_Map, #no_alias info: ^Map_Info, k: uintptr) -> (ok: bool) {
 	if map_len(m) == 0 {
@@ -769,26 +731,36 @@ map_exists_dynamic :: #force_no_inline proc "contextless" (m: Raw_Map, #no_alias
 map_erase_dynamic :: #force_no_inline proc "contextless" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, k: uintptr) -> (old_k, old_v: uintptr, ok: bool) {
 	index := map_lookup_dynamic(m^, info, k) or_return
 	ks, vs, hs, _, _ := map_kvh_data_dynamic(m^, info)
-	hs[index] |= TOMBSTONE_MASK
 	old_k = map_cell_index_dynamic(ks, info.ks, index)
 	old_v = map_cell_index_dynamic(vs, info.vs, index)
 	m.len -= 1
 	ok = true
-
-	mask := (uintptr(1)<<map_log2_cap(m^)) - 1
-	curr_index := uintptr(index)
-	next_index := (curr_index + 1) & mask
-
-	// if the next element is empty or has zero probe distance, then any lookup
-	// will always fail on the next, so we can clear both of them
-	hash := hs[next_index]
-	if map_hash_is_empty(hash) || map_probe_distance(m^, hash, next_index) == 0 {
-		hs[curr_index] = 0
-	} else {
-		hs[curr_index] |= TOMBSTONE_MASK
-	}
-
+	map_erase_slot(m^, hs, index)
 	return
+}
+
+@(require_results)
+map_erase_static :: #force_inline proc "contextless" (m: ^$T/map[$K]$V, key: ^K) -> (old_k, old_v: uintptr, ok: bool) {
+	index := map_lookup_static(m^, key) or_return
+	ks, vs, hs := map_kvh_data_static(m^)
+	old_k = uintptr(map_cell_index_static(ks, index))
+	old_v = uintptr(map_cell_index_static(vs, index))
+	(^Raw_Map)(m).len -= 1
+	ok = true
+	map_erase_slot((^Raw_Map)(m)^, hs, index)
+	return
+}
+
+map_erase_slot :: #force_inline proc "contextless" (m: Raw_Map, hs: [^]Map_Hash, index: uintptr) {
+	mask := (uintptr(1)<<map_log2_cap(m)) - 1
+	next_index := (index + 1) & mask
+
+	hash := hs[next_index]
+	if map_hash_is_empty(hash) || map_probe_distance(m, hash, next_index) == 0 {
+		hs[index] = 0
+	} else {
+		hs[index] |= TOMBSTONE_MASK
+	}
 }
 
 map_clear_dynamic :: #force_inline proc "contextless" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info) {
@@ -905,22 +877,22 @@ __dynamic_map_check_grow :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: 
 	return nil, false
 }
 
-__dynamic_map_set_without_hash :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, key, value: rawptr, loc := #caller_location) -> rawptr {
+__dynamic_map_set_without_hash :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, key, value: rawptr, loc := #caller_location) -> (value_ptr: rawptr, err: Allocator_Error) #optional_allocator_error {
 	return __dynamic_map_set(m, info, info.key_hasher(key, map_seed(m^)), key, value, loc)
 }
 
 
 // IMPORTANT: USED WITHIN THE COMPILER
-__dynamic_map_set :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, hash: Map_Hash, key, value: rawptr, loc := #caller_location) -> rawptr {
+__dynamic_map_set :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, hash: Map_Hash, key, value: rawptr, loc := #caller_location) -> (value_ptr: rawptr, err: Allocator_Error) #optional_allocator_error {
 	if found := __dynamic_map_get(m, info, hash, key); found != nil {
 		intrinsics.mem_copy_non_overlapping(found, value, info.vs.size_of_type)
-		return found
+		return found, nil
 	}
 
 	hash := hash
-	err, has_grown := __dynamic_map_check_grow(m, info, loc)
-	if err != nil {
-		return nil
+	err_grow, has_grown := __dynamic_map_check_grow(m, info, loc)
+	if err_grow != nil {
+		return nil, err_grow
 	}
 	if has_grown {
 		hash = info.key_hasher(key, map_seed(m^))
@@ -930,7 +902,7 @@ __dynamic_map_set :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_In
 	if result != 0 {
 		m.len += 1
 	}
-	return rawptr(result)
+	return rawptr(result), nil
 }
 __dynamic_map_set_extra_without_hash :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, key, value: rawptr, loc := #caller_location) -> (prev_key_ptr, value_ptr: rawptr) {
 	return __dynamic_map_set_extra(m, info, info.key_hasher(key, map_seed(m^)), key, value, loc)
@@ -981,7 +953,6 @@ __dynamic_map_entry :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_
 	return
 }
 
-
 // IMPORTANT: USED WITHIN THE COMPILER
 @(private)
 __dynamic_map_reserve :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Map_Info, new_capacity: uint, loc := #caller_location) -> Allocator_Error {
@@ -991,7 +962,20 @@ __dynamic_map_reserve :: proc "odin" (#no_alias m: ^Raw_Map, #no_alias info: ^Ma
 	return map_reserve_dynamic(m, info, uintptr(new_capacity), loc)
 }
 
+@(require_results, private)
+__ceil_log2 :: #force_inline proc "contextless" (x: uintptr) -> uintptr {
+	// NOTE(barney): log2(0) is undefined, but 0 is a reasonable return value.
+	// Alternatively, 8 could be considered as well.
+	if x == 0 {
+		return 0
+	}
 
+	z := intrinsics.count_leading_zeros(x)
+	if z > 0 && x & (x-1) != 0 {
+		z -= 1
+	}
+	return size_of(uintptr)*8 - 1 - z
+}
 
 // NOTE: the default hashing algorithm derives from fnv64a, with some minor modifications to work for `map` type:
 //
@@ -1017,33 +1001,72 @@ default_hasher :: #force_inline proc "contextless" (data: rawptr, seed: uintptr,
 	return uintptr(h) | uintptr(uintptr(h) == 0)
 }
 
-default_hasher_string :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr {
-	str := (^[]byte)(data)
-	return default_hasher(raw_data(str^), seed, len(str))
-}
-default_hasher_cstring :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr {
-	h := u64(seed) + INITIAL_HASH_SEED
-	if ptr := (^[^]byte)(data)^; ptr != nil {
-		for ptr[0] != 0 {
-			h = (h ~ u64(ptr[0])) * 0x100000001b3
-			ptr = ptr[1:]
+default_hasher_fixed :: #force_inline proc "contextless" (data: rawptr, seed: uintptr, N: int) -> uintptr {
+	@(require_results)
+	hash_fold :: #force_inline proc "contextless" (x, y: uintptr) -> uintptr {
+		when size_of(uintptr) == 8 {
+			p := u128(x) * u128(y)
+			return uintptr(p) ~ uintptr(p >> 64)
+		} else {
+			p := u64(x) * u64(y)
+			return uintptr(p) ~ uintptr(p >> 32)
 		}
 	}
+
+	HASH_K0 :: 0x9e3779b97f4a7c15 when size_of(uintptr) == 8 else 0x9e3779b9
+	HASH_K1 :: 0xbf58476d1ce4e5b9 when size_of(uintptr) == 8 else 0x85ebca6b
+
+	W :: size_of(uintptr)
+	p := uintptr(data)
+	h := uintptr(N)
+	switch {
+	case N >= W:
+		for i := 0; i+W <= N; i += W {
+			h = hash_fold(h ~ intrinsics.unaligned_load((^uintptr)(p + uintptr(i))), HASH_K0)
+		}
+		if N % W != 0 {
+			h = hash_fold(h ~ intrinsics.unaligned_load((^uintptr)(p + uintptr(N-W))), HASH_K0)
+		}
+	case N >= 4:
+		lo := intrinsics.unaligned_load((^u32)(p))
+		hi := intrinsics.unaligned_load((^u32)(p + uintptr(N-4)))
+		h = hash_fold(h ~ uintptr(u64(lo) | u64(hi) << 32), HASH_K0)
+	case N > 0:
+		b := ([^]u8)(p)
+		h = hash_fold(h ~ (uintptr(b[0]) | uintptr(b[N/2]) << 8 | uintptr(b[N-1]) << 16), HASH_K0)
+	}
+	// the seed goes in after the key is mixed, so no key pattern can line up with the difference between two maps' seeds
+	h = hash_fold(h ~ seed, HASH_K1)
 	h &= HASH_MASK
-	return uintptr(h) | uintptr(uintptr(h) == 0)
+	return h | uintptr(h == 0)
+}
+
+default_hasher_string :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr {
+	str := (^[]byte)(data)
+	return default_hasher_fixed(raw_data(str^), seed, len(str))
+}
+default_hasher_cstring :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr {
+	ptr := (^[^]byte)(data)^
+	n := 0
+	if ptr != nil {
+		for ptr[n] != 0 {
+			n += 1
+		}
+	}
+	return default_hasher_fixed(ptr, seed, n)
 }
 
 default_hasher_f64 :: proc "contextless" (f: f64, seed: uintptr) -> uintptr {
 	f := f
 	buf: [size_of(f)]u8
 	if f == 0 {
-		return default_hasher(&buf, seed, size_of(buf))
+		return default_hasher_fixed(&buf, seed, size_of(buf))
 	}
 	if f != f {
 		// TODO(bill): What should the logic be for NaNs?
-		return default_hasher(&f, seed, size_of(f))
+		return default_hasher_fixed(&f, seed, size_of(f))
 	}
-	return default_hasher(&f, seed, size_of(f))
+	return default_hasher_fixed(&f, seed, size_of(f))
 }
 
 default_hasher_complex128 :: proc "contextless" (x, y: f64, seed: uintptr) -> uintptr {

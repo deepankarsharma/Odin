@@ -24,12 +24,12 @@ import "core:strings"
 
 /*
 	Expects an IPv4 address with no leading or trailing whitespace:
-	- a.b.c.d
-	- a.b.c.d:port
-	- [a.b.c.d]:port
+	- `a.b.c.d`
+	- `a.b.c.d:port`
+	- `[a.b.c.d]:port`
 
 	If the IP address is bracketed, the port must be present and valid (though it will be ignored):
-	- [a.b.c.d] will be treated as a parsing failure.
+	- `[a.b.c.d]` will be treated as a parsing failure.
 
 	The port, if present, is required to be a base 10 number in the range 0-65535, inclusive.
 
@@ -425,15 +425,21 @@ parse_hostname_or_endpoint :: proc(endpoint_str: string) -> (target: Host_Or_End
 // Takes an endpoint string and returns its parts.
 // Returns ok=false if port is not a number.
 split_port :: proc(endpoint_str: string) -> (addr_or_host: string, port: int, ok: bool) {
-	// IP6 [addr_or_host]:port
-	if i := strings.last_index(endpoint_str, "]:"); i >= 0 {
-		addr_or_host = endpoint_str[1:i]
-		port, ok = strconv.parse_int(endpoint_str[i+2:], 10)
+	// IP6 [addr_or_host]:port — the bracketed form requires a leading
+	// '[', so only treat a closing "]:" as the port separator when it
+	// sits at index >= 1 (i.e. an opening '[' is actually present).
+	// Inputs that contain "]:" without an opening bracket fall through
+	// to the plain host/port handling below.
+	if len(endpoint_str) > 0 && endpoint_str[0] == '[' {
+		if i := strings.last_index(endpoint_str, "]:"); i >= 1 {
+			addr_or_host = endpoint_str[1:i]
+			port, ok = strconv.parse_int(endpoint_str[i+2:], 10)
 
-		if port > 65535 {
-			ok = false
+			if port > 65535 {
+				ok = false
+			}
+			return
 		}
-		return
 	}
 
 	if n := strings.count(endpoint_str, ":"); n == 1 {

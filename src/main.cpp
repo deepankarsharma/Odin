@@ -7,22 +7,16 @@
 	#pragma warning(disable: 4505)
 #endif
 #include "big_int.cpp"
+#include "big_rat.cpp"
 #if defined(GB_SYSTEM_WINDOWS)
 	#pragma warning(pop)
 #endif
 #include "exact_value.cpp"
 #include "build_settings.cpp"
-gb_global ThreadPool global_thread_pool;
 gb_internal void init_global_thread_pool(void) {
 	isize thread_count = gb_max(build_context.thread_count, 1);
 	isize worker_count = thread_count; // +1
 	thread_pool_init(&global_thread_pool, worker_count, "ThreadPoolWorker");
-}
-gb_internal bool thread_pool_add_task(WorkerTaskProc *proc, void *data) {
-	return thread_pool_add_task(&global_thread_pool, proc, data);
-}
-gb_internal void thread_pool_wait(void) {
-	thread_pool_wait(&global_thread_pool);
 }
 
 
@@ -68,6 +62,8 @@ gb_global Timings global_timings = {0};
 #include "parser.hpp"
 #include "checker.hpp"
 
+#include "asm_tables.cpp"
+
 #include "parser.cpp"
 #include "checker.cpp"
 #include "docs.cpp"
@@ -80,6 +76,10 @@ gb_global Timings global_timings = {0};
 #include "llvm_backend.cpp"
 
 #include "bug_report.cpp"
+
+#if defined(GB_SYSTEM_OSX) || defined(GB_SYSTEM_UNIX)
+int run_subprocess(const char *name, const char **args, bool honor_path = false);
+#endif
 
 // NOTE(bill): 'name' is used in debugging and profiling modes
 gb_internal i32 system_exec_command_line_app_internal(bool exit_on_err, char const *name, char const *fmt, va_list va) {
@@ -152,7 +152,11 @@ gb_internal i32 system_exec_command_line_app_internal(bool exit_on_err, char con
 		gb_printf_err("[SYSTEM CALL] %s\n", name);
 		gb_printf_err("%s\n\n", cmd_line);
 	}
-	exit_code = system(cmd_line);
+
+	int argc;
+	char **argv = command_line_to_spawn_argv(cmd_line, &argc);
+
+	exit_code = run_subprocess(argv[0], cast(const char**)(argv), true);
 	if (exit_on_err && WIFSIGNALED(exit_code)) {
 		struct rlimit limit = { 0, 0, };
 		setrlimit(RLIMIT_CORE, &limit);
@@ -178,12 +182,116 @@ gb_internal i32 system_exec_command_line_app(char const *name, char const *fmt, 
 	return exit_code;
 }
 
-gb_internal void system_must_exec_command_line_app(char const *name, char const *fmt, ...) {
-	va_list va;
-	va_start(va, fmt);
-	system_exec_command_line_app_internal(/* exit_on_err= */ true, name, fmt, va);
-	va_end(va);
+#if !defined(GB_SYSTEM_WINDOWS)
+#include <spawn.h>
+extern char **environ;
+#endif
+
+#if defined(GB_SYSTEM_WINDOWS)
+PROCESS_INFORMATION pi = {0};
+
+BOOL WINAPI run_subprocess_ctrl_c_handler(DWORD signal) {
+	switch (signal) {
+	case CTRL_C_EVENT:
+		// Caught ctrl-c event from child process.
+		TerminateProcess(pi.hProcess, 0);
+		return true;
+	default:
+		return false;
+	}
 }
+
+int run_subprocess(String const &exe_name, wchar_t *after_double_dash_raw) {
+	gbAllocator a = heap_allocator();
+
+	String16 wexe_name = string_to_string16(a, exe_name);
+	defer (gb_free(a, wexe_name.text));
+
+	isize args_len = 0;
+	if (after_double_dash_raw) {
+		args_len = string16_len(cast(u16 *)after_double_dash_raw);
+	}
+
+	isize cmd_len = wexe_name.len + 2;
+	if (args_len > 0) cmd_len += args_len + 1;
+
+	wchar_t *cmd_line = gb_alloc_array(a, wchar_t, cmd_len + 1);
+	defer (gb_free(a, cmd_line));
+
+	isize n = 0;
+	cmd_line[n++] = '"';
+	gb_memmove(cmd_line + n, wexe_name.text, wexe_name.len * gb_size_of(wchar_t));
+	n += wexe_name.len;
+	cmd_line[n++] = '"';
+	if (args_len > 0) {
+		cmd_line[n++] = ' ';
+		gb_memmove(cmd_line + n, after_double_dash_raw, args_len * gb_size_of(wchar_t));
+		n += args_len;
+	}
+	cmd_line[n] = '\0';
+
+	STARTUPINFOW start_info = {gb_size_of(STARTUPINFOW)};
+
+	int exit_code = 0;
+
+	SetConsoleCtrlHandler(run_subprocess_ctrl_c_handler, true);
+	if (CreateProcessW(nullptr, cmd_line,
+	                   nullptr, nullptr, true, 0, nullptr, nullptr,
+	                   &start_info, &pi)) {
+		WaitForSingleObject(pi.hProcess, INFINITE);
+		GetExitCodeProcess(pi.hProcess, cast(DWORD *)&exit_code);
+
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
+	} else {
+		String cmd_line_utf8 = string16_to_string(a, make_string16(cast(u16 *)cmd_line, n));
+		gb_printf_err("Failed to execute command:\n\t%.*s\n", LIT(cmd_line_utf8));
+		gb_free(a, cmd_line_utf8.text);
+		exit_code = -1;
+	}
+	SetConsoleCtrlHandler(run_subprocess_ctrl_c_handler, false);
+
+	return exit_code;
+}
+#else
+int run_subprocess(const char *name, const char **args, bool honor_path) {
+	pid_t pid;
+	int status;
+
+	String exec_name = make_string_c(args[0]);
+	exec_name = last_path_element(exec_name);
+	args[0] = alloc_cstring(gb_heap_allocator(), exec_name);
+
+	if (!honor_path) {
+		status = posix_spawn(&pid, name, NULL, NULL, (char *const *)args, environ);
+	} else {
+		status = posix_spawnp(&pid, name, NULL, NULL, (char *const *)args, environ);
+	}
+	if (status != 0) {
+		gb_printf_err("Could not spawn subprocess: %s\n", strerror(errno));
+		return -1;
+	}
+
+	for (;;) {
+		if (waitpid(pid, &status, WUNTRACED) < 0) {
+			gb_printf_err("Could not wait on subprocess: (pid: %d): %s\n", pid, strerror(errno));
+			return -1;
+		}
+
+		if (WIFEXITED(status)) {
+			return WEXITSTATUS(status);
+		} else if (WIFSIGNALED(status)) {
+			struct rlimit limit = { 0, 0, };
+			setrlimit(RLIMIT_CORE, &limit);
+			raise(WTERMSIG(status));
+			return -1;
+		} else if (WIFSTOPPED(status)) {
+			return -1;
+		}
+	}
+	GB_PANIC("Subprocess failure");
+}
+#endif
 
 #if defined(GB_SYSTEM_WINDOWS)
 #define popen _popen
@@ -217,12 +325,12 @@ gb_internal bool system_exec_command_line_app_output(char const *command, gbStri
 	return true;
 }
 
-gb_internal Array<String> setup_args(int argc, char const **argv) {
+gb_internal Array<String> setup_args(int argc, char const **argv, isize *double_dash_pos, wchar_t **after_double_dash_raw) {
 	gbAllocator a = heap_allocator();
 
 #if defined(GB_SYSTEM_WINDOWS)
 	int wargc = 0;
-	wchar_t **wargv = command_line_to_wargv(GetCommandLineW(), &wargc);
+	wchar_t **wargv = command_line_to_wargv(GetCommandLineW(), &wargc, double_dash_pos, after_double_dash_raw);
 	auto args = array_make<String>(a, 0, wargc);
 	for (isize i = 0; i < wargc; i++) {
 		u16 *warg = cast(u16 *)wargv[i];
@@ -231,6 +339,8 @@ gb_internal Array<String> setup_args(int argc, char const **argv) {
 		String arg = string16_to_string(a, wstr);
 		if (arg.len > 0) {
 			array_add(&args, arg);
+		} else if (double_dash_pos && *double_dash_pos > 0 && args.count < *double_dash_pos) {
+			*double_dash_pos -= 1;
 		}
 	}
 	return args;
@@ -314,7 +424,9 @@ enum BuildFlagKind {
 	BuildFlag_Debug,
 	BuildFlag_DisableAssert,
 	BuildFlag_NoBoundsCheck,
+	BuildFlag_WebkitSwitchWorkaround,
 	BuildFlag_NoTypeAssert,
+	BuildFlag_LifetimeMarkers,
 	BuildFlag_NoDynamicLiterals,
 	BuildFlag_DynamicLiterals,
 	BuildFlag_NoCRT,
@@ -343,6 +455,7 @@ enum BuildFlagKind {
 	BuildFlag_VetSemicolon,
 	BuildFlag_VetCast,
 	BuildFlag_VetTabs,
+	BuildFlag_VetWhenShadowing,
 	BuildFlag_VetPackages,
 
 	BuildFlag_CustomAttribute,
@@ -356,6 +469,7 @@ enum BuildFlagKind {
 	BuildFlag_NoThreadLocal,
 
 	BuildFlag_RelocMode,
+	BuildFlag_StackProtector,
 	BuildFlag_DisableRedZone,
 
 	BuildFlag_DisableUnwind,
@@ -364,6 +478,7 @@ enum BuildFlagKind {
 	BuildFlag_DefaultToNilAllocator,
 	BuildFlag_DefaultToPanicAllocator,
 	BuildFlag_StrictStyle,
+	BuildFlag_StrictStylePackages,
 	BuildFlag_ForeignErrorProcedures,
 	BuildFlag_NoRTTI,
 	BuildFlag_DynamicMapCalls,
@@ -396,6 +511,10 @@ enum BuildFlagKind {
 
 	BuildFlag_BuildDiagnostics,
 
+	BuildFlag_Bedrock,
+	BuildFlag_DisableNonConstantGlobals,
+	BuildFlag_DisableInitFini,
+
 	// internal use only
 	BuildFlag_InternalFastISel,
 	BuildFlag_InternalIgnoreLazy,
@@ -409,6 +528,9 @@ enum BuildFlagKind {
 	BuildFlag_InternalLLVMVerification,
 	BuildFlag_InternalLLVMNoSROA,
 	BuildFlag_InternalEnableRVO,
+	BuildFlag_InternalGlobalEntityGraph,
+	BuildFlag_InternalShuffleGlobalEntities,
+	BuildFlag_InternalCheckGlobalEdges,
 
 	BuildFlag_Sanitize,
 	BuildFlag_LTO,
@@ -423,6 +545,10 @@ enum BuildFlagKind {
 	BuildFlag_AndroidKeystore,
 	BuildFlag_AndroidKeystoreAlias,
 	BuildFlag_AndroidKeystorePassword,
+
+#if !defined(GB_SYSTEM_WINDOWS)
+	BuildFlag_WindowsSDKRoot,
+#endif
 
 	BuildFlag_COUNT,
 };
@@ -452,6 +578,27 @@ gb_internal void add_flag(Array<BuildFlag> *build_flags, BuildFlagKind kind, Str
 	array_add(build_flags, flag);
 }
 
+// A value such as `1e-5` is a float, not an integer. Base prefixed literals are excluded because
+// `e` is a valid digit in bases 16 and above, e.g. `0x1e`.
+gb_internal bool build_param_looks_like_float(String const &param) {
+	if (string_contains_char(param, '.')) {
+		return true;
+	}
+	isize i = 0;
+	if (param.len > 0 && (param[0] == '-' || param[0] == '+')) {
+		i = 1;
+	}
+	if (param.len > i+1 && param[i] == '0' && !gb_char_is_digit(cast(char)param[i+1])) {
+		return false;
+	}
+	for (; i < param.len; i++) {
+		if (param[i] == 'e' || param[i] == 'E') {
+			return true;
+		}
+	}
+	return false;
+}
+
 gb_internal ExactValue build_param_to_exact_value(String name, String param) {
 	ExactValue value = {};
 
@@ -477,7 +624,7 @@ gb_internal ExactValue build_param_to_exact_value(String name, String param) {
 		Try to parse as an integer or float
 	*/
 	if (param[0] == '-' || param[0] == '+' || gb_is_between(param[0], '0', '9')) {
-		if (string_contains_char(param, '.')) {
+		if (build_param_looks_like_float(param)) {
 			value = exact_value_float_from_string(param);
 		} else {
 			value = exact_value_integer_from_string(param);
@@ -549,7 +696,9 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_Debug,                   str_lit("debug"),                     BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DisableAssert,           str_lit("disable-assert"),            BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoBoundsCheck,           str_lit("no-bounds-check"),           BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_WebkitSwitchWorkaround,  str_lit("webkit-switch-workaround"),  BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoTypeAssert,            str_lit("no-type-assert"),            BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_LifetimeMarkers,         str_lit("lifetime-markers"),          BuildFlagParam_None,    Command__does_build);
 	add_flag(&build_flags, BuildFlag_NoThreadLocal,           str_lit("no-thread-local"),           BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoDynamicLiterals,       str_lit("no-dynamic-literals"),       BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DynamicLiterals,         str_lit("dynamic-literals"),          BuildFlagParam_None,    Command__does_check);
@@ -579,6 +728,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_VetSemicolon,            str_lit("vet-semicolon"),             BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetCast,                 str_lit("vet-cast"),                  BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetTabs,                 str_lit("vet-tabs"),                  BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_VetWhenShadowing,        str_lit("vet-when-shadowing"),        BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetPackages,             str_lit("vet-packages"),              BuildFlagParam_String,  Command__does_check);
 
 	add_flag(&build_flags, BuildFlag_CustomAttribute,         str_lit("custom-attribute"),          BuildFlagParam_String,  Command__does_check, true);
@@ -591,6 +741,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_MinimumOSVersion,        str_lit("minimum-os-version"),        BuildFlagParam_String,  Command__does_build | Command_bundle_android);
 
 	add_flag(&build_flags, BuildFlag_RelocMode,               str_lit("reloc-mode"),                BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_StackProtector,          str_lit("stack-protector"),           BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_DisableRedZone,          str_lit("disable-red-zone"),          BuildFlagParam_None,    Command__does_build);
 
 	add_flag(&build_flags, BuildFlag_DisableUnwind,           str_lit("disable-unwind"),          BuildFlagParam_None,    Command__does_build);
@@ -599,6 +750,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_DefaultToNilAllocator,   str_lit("default-to-nil-allocator"),  BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DefaultToPanicAllocator, str_lit("default-to-panic-allocator"),BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_StrictStyle,             str_lit("strict-style"),              BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_StrictStylePackages,     str_lit("strict-style-packages"),     BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_ForeignErrorProcedures,  str_lit("foreign-error-procedures"),  BuildFlagParam_None,    Command__does_check);
 
 	add_flag(&build_flags, BuildFlag_NoRTTI,                  str_lit("no-rtti"),                   BuildFlagParam_None,    Command__does_check);
@@ -631,6 +783,10 @@ gb_internal bool parse_build_flags(Array<String> args) {
 
 	add_flag(&build_flags, BuildFlag_BuildDiagnostics,        str_lit("build-diagnostics"),         BuildFlagParam_None,    Command__does_build);
 
+	add_flag(&build_flags, BuildFlag_Bedrock,                 str_lit("bedrock"),                   BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_DisableNonConstantGlobals, str_lit("disable-non-constant-globals"), BuildFlagParam_None, Command__does_check);
+	add_flag(&build_flags, BuildFlag_DisableInitFini,         str_lit("disable-init-fini"),         BuildFlagParam_None,    Command__does_check);
+
 	add_flag(&build_flags, BuildFlag_InternalFastISel,        str_lit("internal-fast-isel"),        BuildFlagParam_None,    Command_all);
 	add_flag(&build_flags, BuildFlag_InternalIgnoreLazy,      str_lit("internal-ignore-lazy"),      BuildFlagParam_None,    Command_all);
 	add_flag(&build_flags, BuildFlag_InternalIgnoreLLVMBuild, str_lit("internal-ignore-llvm-build"),BuildFlagParam_None,    Command_all);
@@ -643,6 +799,9 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_InternalLLVMVerification, str_lit("internal-ignore-llvm-verification"), BuildFlagParam_None, Command_all);
 	add_flag(&build_flags, BuildFlag_InternalLLVMNoSROA,      str_lit("internal-llvm-no-sroa"), BuildFlagParam_None, Command_all);
 	add_flag(&build_flags, BuildFlag_InternalEnableRVO,       str_lit("internal-enable-rvo"), BuildFlagParam_None, Command_all);
+	add_flag(&build_flags, BuildFlag_InternalGlobalEntityGraph, str_lit("internal-global-entity-graph"), BuildFlagParam_None, Command__does_check);
+	add_flag(&build_flags, BuildFlag_InternalShuffleGlobalEntities, str_lit("internal-shuffle-global-entities"), BuildFlagParam_Integer, Command__does_check);
+	add_flag(&build_flags, BuildFlag_InternalCheckGlobalEdges, str_lit("internal-check-global-edges"), BuildFlagParam_None, Command__does_check);
 
 
 	add_flag(&build_flags, BuildFlag_Sanitize,                str_lit("sanitize"),                  BuildFlagParam_String,  Command__does_build, true);
@@ -659,6 +818,10 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_AndroidKeystore,         str_lit("android-keystore"),          BuildFlagParam_String,  Command_bundle_android);
 	add_flag(&build_flags, BuildFlag_AndroidKeystoreAlias,    str_lit("android-keystore-alias"),    BuildFlagParam_String,  Command_bundle_android);
 	add_flag(&build_flags, BuildFlag_AndroidKeystorePassword, str_lit("android-keystore-password"), BuildFlagParam_String,  Command_bundle_android);
+
+#if !defined(GB_SYSTEM_WINDOWS)
+	add_flag(&build_flags, BuildFlag_WindowsSDKRoot,          str_lit("windows-sdk-root"),          BuildFlagParam_String,  Command_build);
+#endif
 
 
 	Array<String> flag_args = {};
@@ -789,7 +952,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							}
 							break;
 						case BuildFlagParam_Float:
-							if (value.kind != ExactValue_Float) {
+							if (value.kind != ExactValue_Float && value.kind != ExactValue_Rational) {
 								gb_printf_err("%.*s expected a floating pointer number, got %.*s\n", LIT(name), LIT(param));
 								bad_flags = true;
 								ok = false;
@@ -834,7 +997,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							} else if (value.value_string == "speed") {
 								build_context.custom_optimization_level = true;
 								build_context.optimization_level = 2;
-							} else if (value.value_string == "aggressive" && LB_USE_NEW_PASS_SYSTEM) {
+							} else if (value.value_string == "aggressive") {
 								build_context.custom_optimization_level = true;
 								build_context.optimization_level = 3;
 							} else {
@@ -843,9 +1006,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								gb_printf_err("\tminimal\n");
 								gb_printf_err("\tsize\n");
 								gb_printf_err("\tspeed\n");
-								if (LB_USE_NEW_PASS_SYSTEM) {
-									gb_printf_err("\taggressive\n");
-								}
+								gb_printf_err("\taggressive\n");
 								gb_printf_err("\tnone (useful for -debug builds)\n");
 								bad_flags = true;
 							}
@@ -1168,8 +1329,10 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								bool found = false;
 
 								if (selected_target_metrics->metrics->os != TargetOs_darwin &&
-								    selected_target_metrics->metrics->os != TargetOs_linux ) {
-									gb_printf_err("-subtarget can only be used with darwin and linux based targets at the moment\n");
+										selected_target_metrics->metrics->os != TargetOs_linux &&
+									 (selected_target_metrics->metrics->os != TargetOs_freestanding ||
+										selected_target_metrics->metrics->arch != TargetArch_arm32)) {
+									gb_printf_err("-subtarget can only be used with darwin, linux or freestanding_arm32 based targets at the moment\n");
 									bad_flags = true;
 									break;
 								}
@@ -1199,8 +1362,8 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							GB_ASSERT(value.kind == ExactValue_String);
 							String str = value.value_string;
 
-							if (build_context.command != "build") {
-								gb_printf_err("'build-mode' can only be used with the 'build' command\n");
+							if (build_context.command != "build" && build_context.command != "test") {
+								gb_printf_err("'build-mode' can only be used with the 'build' and 'test' commands\n");
 								bad_flags = true;
 								break;
 							}
@@ -1249,8 +1412,14 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_NoBoundsCheck:
 							build_context.no_bounds_check = true;
 							break;
+						case BuildFlag_WebkitSwitchWorkaround:
+							build_context.webkit_switch_workaround = true;
+							break;
 						case BuildFlag_NoTypeAssert:
 							build_context.no_type_assert = true;
+							break;
+						case BuildFlag_LifetimeMarkers:
+							build_context.lifetime_markers = true;
 							break;
 						case BuildFlag_NoDynamicLiterals:
 							gb_printf_err("Warning: Use of -no-dynamic-literals is now redundant\n");
@@ -1343,6 +1512,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_VetSemicolon:        build_context.vet_flags |= VetFlag_Semicolon;        break;
 						case BuildFlag_VetCast:             build_context.vet_flags |= VetFlag_Cast;             break;
 						case BuildFlag_VetTabs:             build_context.vet_flags |= VetFlag_Tabs;             break;
+						case BuildFlag_VetWhenShadowing:    build_context.vet_flags |= VetFlag_WhenShadowing;    break;
 						case BuildFlag_VetUnusedProcedures: build_context.vet_flags |= VetFlag_UnusedProcedures; break;
 
 						case BuildFlag_VetPackages:
@@ -1350,12 +1520,8 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								GB_ASSERT(value.kind == ExactValue_String);
 								String val = value.value_string;
 								String_Iterator it = {val, 0};
-								for (;;) {
-									String pkg = string_split_iterator(&it, ',');
-									if (pkg.len == 0) {
-										break;
-									}
-
+								String pkg = {};
+								while (string_split_iterator_next(&it, ',', &pkg)) {
 									pkg = string_trim_whitespace(pkg);
 									if (!string_is_valid_identifier(pkg)) {
 										gb_printf_err("-%.*s '%.*s' must be a valid identifier\n", LIT(name), LIT(pkg));
@@ -1373,12 +1539,8 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								GB_ASSERT(value.kind == ExactValue_String);
 								String val = value.value_string;
 								String_Iterator it = {val, 0};
-								for (;;) {
-									String attr = string_split_iterator(&it, ',');
-									if (attr.len == 0) {
-										break;
-									}
-
+								String attr = {};
+								while (string_split_iterator_next(&it, ',', &attr)) {
 									attr = string_trim_whitespace(attr);
 									if (!string_is_valid_identifier(attr)) {
 										gb_printf_err("-%.*s '%.*s' must be a valid identifier\n", LIT(name), LIT(attr));
@@ -1445,6 +1607,26 @@ gb_internal bool parse_build_flags(Array<String> args) {
 
 							break;
 						}
+						case BuildFlag_StackProtector: {
+							GB_ASSERT(value.kind == ExactValue_String);
+							String v = value.value_string;
+							if (v == "none") {
+								build_context.stack_protector = StackProtector_None;
+							} else if (v == "base") {
+								build_context.stack_protector = StackProtector_Ssp;
+							} else if (v == "all") {
+								build_context.stack_protector = StackProtector_SspReq;
+							} else if (v == "strong") {
+								build_context.stack_protector = StackProtector_SspStrong;
+							} else {
+								gb_printf_err("-stack-protector flag expected one of the following\n");
+								gb_printf_err("\tnone\n");
+								gb_printf_err("\tbase\n");
+								gb_printf_err("\tall\n");
+								gb_printf_err("\tstrong\n");
+								bad_flags = true;
+							}
+						}
 						case BuildFlag_DisableRedZone:
 							build_context.disable_red_zone = true;
 							break;
@@ -1506,6 +1688,24 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							break;
 						case BuildFlag_StrictStyle:
 							build_context.strict_style = true;
+							break;
+						case BuildFlag_StrictStylePackages:
+							{
+								GB_ASSERT(value.kind == ExactValue_String);
+								String val = value.value_string;
+								String_Iterator it = {val, 0};
+								String pkg = {};
+								while (string_split_iterator_next(&it, ',', &pkg)) {
+									pkg = string_trim_whitespace(pkg);
+									if (!string_is_valid_identifier(pkg)) {
+										gb_printf_err("-%.*s '%.*s' must be a valid identifier\n", LIT(name), LIT(pkg));
+										bad_flags = true;
+										continue;
+									}
+
+									string_set_add(&build_context.strict_style_packages, pkg);
+								}
+							}
 							break;
 						case BuildFlag_Short:
 							build_context.cmd_doc_flags |= CmdDocFlag_Short;
@@ -1613,6 +1813,20 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							build_context.build_diagnostics = true;
 							break;
 
+						case BuildFlag_Bedrock:
+							build_context.bedrock = true;
+							build_context.no_rtti = true;
+							build_context.disable_non_constant_globals = true;
+							build_context.disable_init_fini = true;
+							break;
+
+						case BuildFlag_DisableNonConstantGlobals:
+							build_context.disable_non_constant_globals = true;
+							break;
+						case BuildFlag_DisableInitFini:
+							build_context.disable_init_fini = true;
+							break;
+
 						case BuildFlag_InternalFastISel:
 							build_context.fast_isel = true;
 							break;
@@ -1651,6 +1865,16 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_InternalEnableRVO:
 							build_context.enable_rvo = true;
 							break;
+						case BuildFlag_InternalGlobalEntityGraph:
+							build_context.internal_global_entity_graph = true;
+							break;
+						case BuildFlag_InternalShuffleGlobalEntities:
+							GB_ASSERT(value.kind == ExactValue_Integer);
+							build_context.internal_shuffle_global_entities = cast(u64)big_int_to_i64(&value.value_integer);
+							break;
+						case BuildFlag_InternalCheckGlobalEdges:
+							build_context.internal_check_global_edges = true;
+							break;
 
 
 						case BuildFlag_Sanitize:
@@ -1677,7 +1901,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							GB_ASSERT(value.kind == ExactValue_String);
 							if (str_eq_ignore_case(value.value_string, str_lit("thin"))) {
 								build_context.lto_kind = LTO_Thin;
-								if (build_context.linker_choice == Linker_Invalid || build_context.linker_choice == Linker_Default) {
+								if (build_context.linker_choice == Linker_Invalid) {
 									build_context.linker_choice = Linker_lld;
 								}
 								if (!build_context.use_separate_modules) {
@@ -1817,6 +2041,13 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							GB_ASSERT(value.kind == ExactValue_String);
 							build_context.android_keystore_password = value.value_string;
 							break;
+
+					#if !defined(GB_SYSTEM_WINDOWS)
+						case BuildFlag_WindowsSDKRoot:
+							GB_ASSERT(value.kind == ExactValue_String);
+							build_context.windows_sdk_root = value.value_string;
+							break;
+					#endif
 						}
 					}
 
@@ -2174,6 +2405,132 @@ gb_internal void show_import_graph(Checker *c) {
 	gb_printf("}\n\n");
 }
 
+gb_internal void add_time_to_tokenize_only(AstFile *f, f64 *time, u64 *cpu_time) {
+	isize size = f->tokenizer.end - f->tokenizer.start;
+	if (size <= 0) {
+		return;
+	}
+	Tokenizer t = {};
+	t.curr_file_id = f->id;
+	init_tokenizer_with_data(&t, f->fullpath, f->tokenizer.start, size);
+
+	u64 start     = time_stamp_time_now();
+	u64 cpu_start = thread_cpu_time_now();
+	Token token = {};
+	do {
+		tokenizer_get_token(&t, &token);
+	} while (token.kind != Token_EOF && token.kind != Token_Invalid);
+	*cpu_time += thread_cpu_time_now()-cpu_start;
+	*time     += cast(f64)(time_stamp_time_now()-start)/cast(f64)time_stamp__freq();
+}
+
+gb_internal GB_COMPARE_PROC(file_cpu_time_to_parse_cmp) {
+	AstFile *x = *(AstFile **)a;
+	AstFile *y = *(AstFile **)b;
+	if (x->cpu_time_to_parse != y->cpu_time_to_parse) {
+		return x->cpu_time_to_parse > y->cpu_time_to_parse ? -1 : +1;
+	}
+	return string_compare(x->fullpath, y->fullpath);
+}
+
+gb_internal void show_parse_timings(Parser *p, Timings *t) {
+	auto all_files = array_make<AstFile *>(heap_allocator(), 0, p->packages.count*8);
+	defer (array_free(&all_files));
+	for (AstPackage *pkg : p->packages) {
+		for (AstFile *file : pkg->files) {
+			array_add(&all_files, file);
+		}
+	}
+
+	f64 cpu_freq = thread_cpu_time_freq();
+
+	isize tokens = p->total_token_count;
+	isize lines  = p->total_line_count;
+	isize total_file_size = 0;
+
+	f64 load_time          = 0;
+	f64 load_cpu_time      = 0;
+	f64 parse_time         = 0;
+	f64 parse_cpu_time     = 0;
+	f64 setup_time         = 0;
+	f64 setup_cpu_time     = 0;
+	f64 tokenize_time      = 0;
+	u64 tokenize_cpu_ticks = 0;
+
+	for (AstFile *file : all_files) {
+		total_file_size += file->tokenizer.end - file->tokenizer.start;
+		load_time       += file->time_to_load;
+		parse_time      += file->time_to_parse;
+		setup_time      += file->time_to_setup_decls;
+		load_cpu_time   += cast(f64)file->cpu_time_to_load/cpu_freq;
+		parse_cpu_time  += cast(f64)file->cpu_time_to_parse/cpu_freq;
+		setup_cpu_time  += cast(f64)file->cpu_time_to_setup_decls/cpu_freq;
+
+		add_time_to_tokenize_only(file, &tokenize_time, &tokenize_cpu_ticks);
+	}
+
+	f64 tokenize_cpu_time = cast(f64)tokenize_cpu_ticks/cpu_freq;
+
+	f64 wall_time = 0;
+	for (TimeStamp const &s : t->sections) {
+		if (s.label == "parse files") {
+			wall_time = time_stamp_as_s(s, t->freq);
+			break;
+		}
+	}
+
+	isize thread_count = gb_max(global_thread_pool.threads.count, 1);
+	f64 task_time     = load_time + parse_time + setup_time;
+	f64 task_cpu_time = load_cpu_time + parse_cpu_time + setup_cpu_time;
+	f64 mib = cast(f64)total_file_size/(1024.0*1024.0);
+
+	auto const &row = [&](char const *label, f64 time, f64 cpu_time, bool rates) {
+		gb_printf_err("    %s - %9.3f ms  %9.3f ms", label, 1.0e3*time, 1.0e3*cpu_time);
+		if (rates) {
+			f64 lines_per_second = cast(f64)lines/cpu_time;
+			char const *loc = "  LOC/s";
+			if (lines_per_second >= 1.0e6) {
+				lines_per_second /= 1.0e6;
+				loc = " MLOC/s";
+			} else if (lines_per_second >= 1.0e3) {
+				lines_per_second /= 1.0e3;
+				loc = " kLOC/s";
+			}
+			gb_printf_err("  %7.3f us/token  %7.3f us/line  %8.2f MiB/s  %7.2f%s",
+			              1.0e6*cpu_time/cast(f64)tokens, 1.0e6*cpu_time/cast(f64)lines, mib/cpu_time, lines_per_second, loc);
+		}
+		gb_printf_err("\n");
+	};
+
+	gb_printf_err("Parsing (%td files, %td lines, %td tokens, %.2f MiB, %td threads)\n", all_files.count, lines, tokens, mib, thread_count);
+	gb_printf_err("    parse files                      - %9.3f ms (wall time)\n", 1.0e3*wall_time);
+	gb_printf_err("                                         wall time   CPU time  (rates from the CPU time)\n");
+	row(          "file tasks                      ", task_time, task_cpu_time, false);
+	row(          "  loading files                 ", load_time, load_cpu_time, false);
+	row(          "  tokenizing and parsing        ", parse_time, parse_cpu_time, true);
+	row(          "  setting up decls and imports  ", setup_time, setup_cpu_time, false);
+	row(          "tokenizing alone, 1 thread      ", tokenize_time, tokenize_cpu_time, true);
+	if (build_context.thread_count == 1) {
+		row(      "parsing alone (estimated)       ", parse_time-tokenize_time, parse_cpu_time-tokenize_cpu_time, true);
+	} else {
+		gb_printf_err("    parsing alone                    - estimated with -thread-count:1\n");
+	}
+	gb_printf_err("    the file tasks kept the threads %.0f%% busy and %.0f%% of their time was spent running\n",
+	              100.0*task_time/(wall_time*cast(f64)thread_count), 100.0*task_cpu_time/task_time);
+	gb_printf_err("\n");
+
+	array_sort(all_files, file_cpu_time_to_parse_cmp);
+	gb_printf_err("Slowest files to tokenize and parse, by CPU time\n");
+	for (isize i = 0; i < gb_min(all_files.count, 8); i++) {
+		AstFile *file = all_files[i];
+		f64 cpu_time = cast(f64)file->cpu_time_to_parse/cpu_freq;
+		gb_printf_err("    %9.3f ms  %9.3f ms (wall)  %8td tokens  %7.3f us/token  %.*s\n",
+		              1.0e3*cpu_time, 1.0e3*file->time_to_parse, file->token_count,
+		              1.0e6*cpu_time/cast(f64)gb_max(file->token_count, 1), LIT(file->fullpath));
+	}
+	gb_printf_err("\n");
+}
+
 gb_internal void show_timings(Checker *c, Timings *t) {
 	Parser *p      = c->parser;
 	isize lines    = p->total_line_count;
@@ -2181,13 +2538,9 @@ gb_internal void show_timings(Checker *c, Timings *t) {
 	isize files    = 0;
 	isize packages = p->packages.count;
 	isize total_file_size = 0;
-	f64 total_tokenizing_time = 0;
-	f64 total_parsing_time = 0;
 	for (AstPackage *pkg : p->packages) {
 		files += pkg->files.count;
 		for (AstFile *file : pkg->files) {
-			total_tokenizing_time += file->time_to_tokenize;
-			total_parsing_time += file->time_to_parse;
 			total_file_size += file->tokenizer.end - file->tokenizer.start;
 		}
 	}
@@ -2210,54 +2563,7 @@ gb_internal void show_timings(Checker *c, Timings *t) {
 			gb_printf_err("Total File Size - %td\n", total_file_size);
 			gb_printf_err("\n");
 		}
-		{
-			f64 time = total_tokenizing_time;
-			gb_printf_err("Tokenization Only\n");
-			gb_printf_err("LOC/s        - %.3f\n", cast(f64)lines/time);
-			gb_printf_err("us/LOC       - %.3f\n", 1.0e6*time/cast(f64)lines);
-			gb_printf_err("Tokens/s     - %.3f\n", cast(f64)tokens/time);
-			gb_printf_err("us/Token     - %.3f\n", 1.0e6*time/cast(f64)tokens);
-			gb_printf_err("bytes/s      - %.3f\n", cast(f64)total_file_size/time);
-			gb_printf_err("MiB/s        - %.3f\n", cast(f64)(total_file_size/time)/(1024*1024));
-			gb_printf_err("us/bytes     - %.3f\n", 1.0e6*time/cast(f64)total_file_size);
-
-			gb_printf_err("\n");
-		}
-		{
-			f64 time = total_parsing_time;
-			gb_printf_err("Parsing Only\n");
-			gb_printf_err("LOC/s        - %.3f\n", cast(f64)lines/time);
-			gb_printf_err("us/LOC       - %.3f\n", 1.0e6*time/cast(f64)lines);
-			gb_printf_err("Tokens/s     - %.3f\n", cast(f64)tokens/time);
-			gb_printf_err("us/Token     - %.3f\n", 1.0e6*time/cast(f64)tokens);
-			gb_printf_err("bytes/s      - %.3f\n", cast(f64)total_file_size/time);
-			gb_printf_err("MiB/s        - %.3f\n", cast(f64)(total_file_size/time)/(1024*1024));
-			gb_printf_err("us/bytes     - %.3f\n", 1.0e6*time/cast(f64)total_file_size);
-
-			gb_printf_err("\n");
-		}
-		{
-			TimeStamp ts = {};
-			for (TimeStamp const &s : t->sections) {
-				if (s.label == "parse files") {
-					ts = s;
-					break;
-				}
-			}
-			GB_ASSERT(ts.label == "parse files");
-
-			f64 parse_time = time_stamp_as_s(ts, t->freq);
-			gb_printf_err("Parse pass\n");
-			gb_printf_err("LOC/s        - %.3f\n", cast(f64)lines/parse_time);
-			gb_printf_err("us/LOC       - %.3f\n", 1.0e6*parse_time/cast(f64)lines);
-			gb_printf_err("Tokens/s     - %.3f\n", cast(f64)tokens/parse_time);
-			gb_printf_err("us/Token     - %.3f\n", 1.0e6*parse_time/cast(f64)tokens);
-			gb_printf_err("bytes/s      - %.3f\n", cast(f64)total_file_size/parse_time);
-			gb_printf_err("MiB/s        - %.3f\n", cast(f64)(total_file_size/parse_time)/(1024*1024));
-			gb_printf_err("us/bytes     - %.3f\n", 1.0e6*parse_time/cast(f64)total_file_size);
-
-			gb_printf_err("\n");
-		}
+		show_parse_timings(p, t);
 		{
 			TimeStamp ts = {};
 			TimeStamp ts_end = {};
@@ -2347,7 +2653,7 @@ gb_internal void export_dependencies(Checker *c) {
 		}
 		array_add(&load_files, cache);
 	}
-	array_sort(files, file_cache_sort_cmp);
+	array_sort(load_files, file_cache_sort_cmp);
 
 	if (build_context.export_dependencies_format == DependenciesExportMake) {
 		String exe_name = path_to_string(heap_allocator(), build_context.build_paths[BuildPath_Output]);
@@ -2639,6 +2945,19 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		}
 	}
 
+	if (check) {
+		if (print_flag("-bedrock")) {
+			print_usage_line(2, "Disables numerous features. List of disabled features:");
+			print_usage_line(3, "`map` types");
+			print_usage_line(3, "128-bit integer types");
+			print_usage_line(3, "runtime type information (-no-rtti)");
+			print_usage_line(3, "non-constant global variables (-disable-non-constant-globals)");
+			print_usage_line(3, "@(init) @(fini) (-disable-init-fini)");
+			print_usage_line(3, "Anything Objective-C related");
+			print_usage_line(3, "The default paths to the library collections 'core' and 'vendor'");
+		}
+	}
+
 	if (build) {
 		if (print_flag("-build-mode:<mode>")) {
 			print_usage_line(2, "Sets the build mode.");
@@ -2662,10 +2981,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 
 	if (check) {
 		if (print_flag("-collection:<name>=<filepath>")) {
-			print_usage_line(2, "Defines a library collection used for imports.");
+			print_usage_line(2, "Defines a library collection used for imports and foreign imports.");
 			print_usage_line(2, "Example: -collection:shared=dir/to/shared");
 			print_usage_line(2, "Usage in Code:");
 				print_usage_line(3, "import \"shared:foo\"");
+				print_usage_line(3, "foreign import lib \"shared:libfoo.a\"");
 		}
 
 		if (print_flag("-custom-attribute:<string>")) {
@@ -2705,7 +3025,15 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		if (print_flag("-disable-assert")) {
 			print_usage_line(2, "Disables the code generation of the built-in run-time 'assert' procedure, and defines the global constant ODIN_DISABLE_ASSERT to be 'true'.");
 		}
+	}
 
+	if (check) {
+		if (print_flag("-disable-init-fini")) {
+			print_usage_line(2, "Disables the ability to use @(init) and @(fini) procedures");
+		}
+	}
+
+	if (run_or_build) {
 		if (print_flag("-disable-red-zone")) {
 			print_usage_line(2, "Disables red zone on a supported freestanding target.");
 		}
@@ -2715,7 +3043,12 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		if (print_flag("-disallow-do")) {
 			print_usage_line(2, "Disallows the 'do' keyword in the project.");
 		}
+
+		if (print_flag("-disable-non-constant-globals")) {
+			print_usage_line(2, "Disables any global variables which are not initialized with global constants");
+		}
 	}
+
 
 	if (doc) {
 		if (print_flag("-doc-format")) {
@@ -2844,10 +3177,21 @@ gb_internal int print_show_help(String const arg0, String command, String option
 	}
 
 	if (run_or_build) {
+		if (print_flag("-lifetime-markers")) {
+			print_usage_line(2, "Emits lifetime markers for named locals, so that locals from");
+			print_usage_line(2, "non-overlapping scopes may reuse stack.");
+			print_usage_line(2, "Requires '-o:size' or above; no effect with '-sanitize:address'.");
+			print_usage_line(2, "Warning: this applies to every package in the build; using the address");
+			print_usage_line(2, "of a local after the local's declaring scope ended can miscompile.");
+		}
+
 		if (print_flag("-linker:<string>")) {
 			print_usage_line(2, "Specify the linker to use.");
 			print_usage_line(2, "Choices:");
 			for (i32 i = 0; i < Linker_COUNT; i++) {
+				#if !defined(GB_SYSTEM_WINDOWS)
+				if (linker_choices[i] == "msvc") continue;
+				#endif
 				print_usage_line(3, "%.*s", LIT(linker_choices[i]));
 			}
 		}
@@ -2905,6 +3249,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "Disables bounds checking program wide.");
 		}
 
+		if (print_flag("-webkit-switch-workaround")) {
+			print_usage_line(2, "Constrains 'typeid' values to 63 bits to avoid an OMG JIT crash in WebKit when running WASM builds.");
+			print_usage_line(2, "Only needed for 'js_wasm32'/'js_wasm64p32' targets run in Safari/WebKit. See: https://github.com/odin-lang/Odin/issues/6810");
+		}
+
 		if (print_flag("-no-crt")) {
 			print_usage_line(2, "Disables automatic linking with the C Run Time.");
 		}
@@ -2942,9 +3291,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 				print_usage_line(3, "-o:minimal");
 				print_usage_line(3, "-o:size");
 				print_usage_line(3, "-o:speed");
-			if (LB_USE_NEW_PASS_SYSTEM) {
 				print_usage_line(3, "-o:aggressive (use this with caution)");
-			}
 			print_usage_line(2, "The default is -o:minimal. If -debug is set, the default is -o:none.");
 		}
 
@@ -2998,6 +3345,15 @@ gb_internal int print_show_help(String const arg0, String command, String option
 				print_usage_line(3, "-reloc-mode:static");
 				print_usage_line(3, "-reloc-mode:pic");
 				print_usage_line(3, "-reloc-mode:dynamic-no-pic");
+		}
+
+		if (print_flag("-stack-protector:<string>")) {
+			print_usage_line(2, "Specifies the stack protector.");
+			print_usage_line(2, "Available options:");
+				print_usage_line(3, "-stack-protector:none");
+				print_usage_line(3, "-stack-protector:base");
+				print_usage_line(3, "-stack-protector:all");
+				print_usage_line(3, "-stack-protector:strong");
 		}
 
 	#if defined(GB_SYSTEM_WINDOWS)
@@ -3072,6 +3428,10 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "Errs when the attached-brace style is not adhered to (also known as 1TBS).");
 			print_usage_line(2, "Errs when 'case' labels are not in the same column as the associated 'switch' token.");
 		}
+		if (print_flag("-strict-style-packages:<comma-separated-strings>")) {
+			print_usage_line(2, "Sets which packages by name will be checked against with '-strict-style'.");
+			print_usage_line(2, "Files with specific +vet tags will not be ignored if they are not in the packages set.");
+		}
 	}
 
 	if (run_or_build) {
@@ -3099,7 +3459,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 
 	if (build) {
 		if (print_flag("-subtarget:<subtarget>")) {
-			print_usage_line(2, "[Darwin and Linux only]");
+			print_usage_line(2, "[Darwin, Linux and Freestanding ARM32 only]");
 			print_usage_line(2, "Available subtargets:");
 			String prefix = str_lit("-subtarget:");
 			for (u32 i = 1; i < Subtarget_COUNT; i++) {
@@ -3109,6 +3469,16 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			}
 		}
 	}
+
+#if !defined(GB_SYSTEM_WINDOWS)
+	if (build) {
+		if (print_flag("-windows-sdk-root:<string>")) {
+			print_usage_line(2, "Path to the root directory of the Windows SDK for cross-linking.");
+			print_usage_line(2, "Requires '-linker:lld' flag and 'lld-link' installation.");
+			print_usage_line(2, "Example: -windows-sdk-root:~/windows-sdk");
+		}
+	}
+#endif
 
 	if (run_or_build) {
 		if (print_flag("-target-features:<string>")) {
@@ -3162,6 +3532,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 				print_usage_line(3, "-vet-unused-imports");
 				print_usage_line(3, "-vet-shadowing");
 				print_usage_line(3, "-vet-using-stmt");
+				print_usage_line(3, "-vet-when-shadowing");
 		}
 
 		if (print_flag("-vet-cast")) {
@@ -3220,6 +3591,10 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		if (print_flag("-vet-using-stmt")) {
 			print_usage_line(2, "Checks for the use of 'using' as a statement.");
 			print_usage_line(2, "'using' is considered bad practice outside of immediate refactoring.");
+		}
+
+		if (print_flag("-vet-when-shadowing")) {
+			print_usage_line(2, "Checks for declarations within a global 'when' that shadow a builtin or package-level name.");
 		}
 	}
 
@@ -3291,6 +3666,7 @@ gb_internal void print_show_unused(Checker *c) {
 		case Entity_ProcGroup:
 		case Entity_ImportName:
 		case Entity_LibraryName:
+		case Entity_AsmTemplate:
 			// Fine
 			break;
 		}
@@ -3371,7 +3747,7 @@ gb_internal gbFileError write_file_with_stripped_tokens(gbFile *f, AstFile *file
 	u8 const *file_data = file->tokenizer.start;
 	i32 prev_offset = 0;
 	i32 const end_offset = cast(i32)(file->tokenizer.end - file->tokenizer.start);
-	for (Token const &token : file->tokens) {
+	for (Token const &token : file->token_edits) {
 		if (token.flags & (TokenFlag_Remove|TokenFlag_Replace)) {
 			i32 offset = token.pos.offset;
 			i32 to_write = offset-prev_offset;
@@ -3414,15 +3790,7 @@ gb_internal int strip_semicolons(Parser *parser) {
 
 	for (AstPackage *pkg : parser->packages) {
 		for (AstFile *file : pkg->files) {
-			bool nothing_to_change = true;
-			for (Token const &token : file->tokens) {
-				if (token.flags) {
-					nothing_to_change = false;
-					break;
-				}
-			}
-
-			if (nothing_to_change) {
+			if (file->token_edits.count == 0) {
 				continue;
 			}
 
@@ -3540,6 +3908,32 @@ gb_internal int strip_semicolons(Parser *parser) {
 	return cast(int)failed;
 }
 
+gb_internal void setup_bedrock_mode(void) {
+	if (!build_context.bedrock) {
+		return;
+	}
+
+	bool seen_core = false;
+	bool seen_vendor = false;
+	for (isize i = 0; i < library_collections.count; /**/) {
+		if (!seen_core && library_collections[i].name == "core") {
+			array_ordered_remove(&library_collections, i);
+			seen_core = true;
+			continue;
+		}
+
+		if (!seen_vendor && library_collections[i].name == "vendor") {
+			array_ordered_remove(&library_collections, i);
+			seen_vendor = true;
+			continue;
+		}
+
+		i += 1;
+	}
+
+	build_context.ODIN_DEFAULT_TO_NIL_ALLOCATOR = true;
+}
+
 gb_internal void init_terminal(void) {
 	TIME_SECTION("init terminal");
 	build_context.has_ansi_terminal_colours = false;
@@ -3598,6 +3992,13 @@ int main(int arg_count, char const **arg_ptr) {
 	defer (timings_destroy(&global_timings));
 
 	MAIN_TIME_SECTION("initialization");
+	// NOTE(Jeroen): Set codepage to UTF-8 (Windows only) and restore on exit.
+	//               Keep in mind this is for the compiler's own output only.
+	//               Like error messages on lines containing unicode.
+	//               Child processes will inherit the default codepage,
+	//               and so must do their own codepage management if they want.
+	set_utf8_codepage();
+	defer (restore_old_codepage());
 
 	init_string_interner();
 	init_global_error_collector();
@@ -3627,21 +4028,55 @@ int main(int arg_count, char const **arg_ptr) {
 	TIME_SECTION("init args");
 	map_init(&build_context.defined_values);
 	build_context.extra_packages.allocator = heap_allocator();
+	
+	init_build_context_error_pos_style();
 
-	Array<String> args = setup_args(arg_count, arg_ptr);
+	isize double_dash_pos = -1;
+	wchar_t *after_double_dash_raw = nullptr;
+	Array<String> args = setup_args(arg_count, arg_ptr, &double_dash_pos, &after_double_dash_raw);
+#if !defined(GB_SYSTEM_WINDOWS)
+	Array<String> run_args = array_make<String>(heap_allocator(), 0, arg_count);
+	defer (array_free(&run_args));
+#endif
 
 	String command = args[1];
 	String init_filename = {};
-	String run_args_string = {};
 	isize  last_non_run_arg = args.count;
 
 	for_array(i, args) {
 		if (args[i] == "--") {
+#if defined(GB_SYSTEM_WINDOWS)
+			GB_ASSERT(double_dash_pos == i);
+#endif
+			double_dash_pos = i;
 			break;
 		}
+
 		if (args[i] == "-help" || args[i] == "--help") {
 			build_context.show_help = true;
 			return print_show_help(args[0], command);
+		}
+	}
+
+	if (args.count > 2) {
+		// NOTE(bill): Allow for both `odin command path -flags` and `odin command -flags path`
+		// To do this, if the first argument after the command and last argument is NOT a flag,
+		// then put that last parameter first
+		isize end_arg = double_dash_pos >= 0 ? double_dash_pos : args.count-1;
+		if (args[1] == "bundle" && args.count > 4) {
+			if (string_starts_with(args[3], str_lit("-")) &&
+			    !string_starts_with(args[end_arg], str_lit("-"))) {
+				String possible_path = args[end_arg];
+				array_ordered_remove(&args, end_arg);
+				array_inject_at(&args, 3, possible_path);
+			}
+		} else if (args.count > 3) {
+			if (string_starts_with(args[2], str_lit("-")) &&
+			    !string_starts_with(args[end_arg], str_lit("-"))) {
+				String possible_path = args[end_arg];
+				array_ordered_remove(&args, end_arg);
+				array_inject_at(&args, 2, possible_path);
+			}
 		}
 	}
 
@@ -3656,31 +4091,22 @@ int main(int arg_count, char const **arg_ptr) {
 			build_context.command_kind = Command_test;
 		}
 
-		Array<String> run_args = array_make<String>(heap_allocator(), 0, arg_count);
-		defer (array_free(&run_args));
+		if (double_dash_pos != -1) {
+			last_non_run_arg = double_dash_pos;
 
-		isize run_args_start_idx = -1;
-		for_array(i, args) {
-			if (args[i] == "--") {
-				run_args_start_idx = i;
-				break;
-			}
-		}
-		if (run_args_start_idx != -1) {
-			last_non_run_arg = run_args_start_idx;
-
-			if (run_args_start_idx == 2) {
+			if (double_dash_pos == 2) {
 				// missing src path on argv[2], invocation: odin [run|test] --
 				usage(args[0]);
 				return 1;
 			}
 
-			for(isize i = run_args_start_idx+1; i < args.count; ++i) {
+#if !defined(GB_SYSTEM_WINDOWS)
+			for(isize i = double_dash_pos+1; i < args.count; ++i) {
 				array_add(&run_args, args[i]);
 			}
+#endif
 		}
 		args = array_slice(args, 0, last_non_run_arg);
-		run_args_string = string_join_and_quote(heap_allocator(), run_args);
 
 		init_filename = args[2];
 		run_output = true;
@@ -3788,6 +4214,10 @@ int main(int arg_count, char const **arg_ptr) {
 			usage(args[0]);
 			return 1;
 		}
+		// NOTE(Jeroen): `odin root` omits a newline on purpose so that it can be used in scripts.
+		//               e.g. `ODIN_CORE="$(odin root)core"`.
+		//               Human convenience is not a consideration.
+		//               Further pull requests to add a newline will be closed without comment.
 		gb_printf("%.*s", LIT(odin_root_dir()));
 		return 0;
 	} else if (command == "clear-cache") {
@@ -3814,6 +4244,10 @@ int main(int arg_count, char const **arg_ptr) {
 
 	if (build_context.show_help) {
 		return print_show_help(args[0], command);
+	}
+
+	if (build_context.bedrock) {
+		setup_bedrock_mode();
 	}
 
 	if (init_filename.len > 0 && !build_context.show_help) {
@@ -3915,6 +4349,13 @@ int main(int arg_count, char const **arg_ptr) {
 	// 	return 1;
 	// }
 	
+#if !defined(GB_SYSTEM_WINDOWS)
+	if (build_context.metrics.os == TargetOs_windows && build_context.windows_sdk_root.len == 0) {
+		gb_printf_err("-windows-sdk-root:<path> must be used to target Windows\n");
+		gb_exit(1);
+	}
+#endif
+
 	// Warn about Windows i386 thread-local storage limitations
 	if (build_context.metrics.arch == TargetArch_i386 && build_context.metrics.os == TargetOs_windows) {
 		gb_printf_err("Warning: Thread-local storage is disabled on Windows i386.\n");
@@ -3928,9 +4369,8 @@ int main(int arg_count, char const **arg_ptr) {
 	} else {
 		String march_list = target_microarch_list[build_context.metrics.arch];
 		String_Iterator it = {march_list, 0};
-		for (;;) {
-			String str = string_split_iterator(&it, ',');
-			if (str == "") break;
+		String str = {};
+		while (string_split_iterator_next(&it, ',', &str)) {
 			if (str == build_context.microarch) {
 				// Found matching microarch
 				print_microarch_list = false;
@@ -3955,9 +4395,8 @@ int main(int arg_count, char const **arg_ptr) {
 		String march_list  = target_microarch_list[build_context.metrics.arch];
 		String_Iterator it = {march_list, 0};
 
-		for (;;) {
-			String str = string_split_iterator(&it, ',');
-			if (str == "") break;
+		String str = {};
+		while (string_split_iterator_next(&it, ',', &str)) {
 			if (str == default_march) {
 				gb_printf("\t%.*s (default)\n", LIT(str));
 			} else {
@@ -3971,9 +4410,8 @@ int main(int arg_count, char const **arg_ptr) {
 	String default_features = get_default_features();
 	{
 		String_Iterator it = {default_features, 0};
-		for (;;) {
-			String str = string_split_iterator(&it, ',');
-			if (str == "") break;
+		String str = {};
+		while (string_split_iterator_next(&it, ',', &str)) {
 			string_set_add(&build_context.target_features_set, str);
 		}
 	}
@@ -3993,10 +4431,8 @@ int main(int arg_count, char const **arg_ptr) {
 
 	if (build_context.target_features_string.len != 0) {
 		String_Iterator target_it = {build_context.target_features_string, 0};
-		for (;;) {
-			String item = string_split_iterator(&target_it, ',');
-			if (item == "") break;
-			
+		String item = {};
+		while (string_split_iterator_next(&target_it, ',', &item)) {
 			String stripped_item = item;
 			if (*stripped_item.text == '+' || *stripped_item.text == '-') {
 				stripped_item.text++;
@@ -4013,9 +4449,8 @@ int main(int arg_count, char const **arg_ptr) {
 
 				String feature_list = target_features_list[build_context.metrics.arch];
 				String_Iterator it = {feature_list, 0};
-				for (;;) {
-					String str = string_split_iterator(&it, ',');
-					if (str == "") break;
+				String str = {};
+				while (string_split_iterator_next(&it, ',', &str)) {
 					if (check_single_target_feature_is_valid(default_features, str)) {
 						if (has_ansi_terminal_colours()) {
 							gb_printf("\t%.*s\x1b[38;5;244m (implied by target microarch %.*s)\x1b[0m\n", LIT(str), LIT(march));
@@ -4058,12 +4493,6 @@ int main(int arg_count, char const **arg_ptr) {
 			gb_printf_err("missing required target feature: \"%.*s\", enable it by setting a different -microarch or explicitly adding it through -target-features\n", LIT(disabled));
 			gb_exit(1);
 		}
-
-		// NOTE(laytan): some weird errors on LLVM 14 that LLVM 17 fixes.
-		if (LLVM_VERSION_MAJOR < 17) {
-			gb_printf_err("Invalid LLVM version %s, RISC-V targets require at least LLVM 17\n", LLVM_VERSION_STRING);
-			gb_exit(1);
-		}
 	}
 
 	if (build_context.show_debug_messages) {
@@ -4088,12 +4517,19 @@ int main(int arg_count, char const **arg_ptr) {
 	Checker *checker = permanent_alloc_item<Checker>();
 	bool failed_to_cache_parsing = false;
 
+	TIME_SECTION("init asm tables");
+	init_asm_tables(build_context.metrics.ptr_size);
+
+	checker->parser = parser;
+	init_checker(checker);
+
 	MAIN_TIME_SECTION("parse files");
 
 	if (!init_parser(parser)) {
 		return 1;
 	}
 	defer (destroy_parser(parser));
+	parser->package_parsed_proc = check_collect_package_entities_worker_proc;
 
 	// TODO(jeroen): Remove the `init_filename` param.
 	// Let's put that on `build_context.build_paths[0]` instead.
@@ -4106,10 +4542,8 @@ int main(int arg_count, char const **arg_ptr) {
 		print_all_errors();
 		return 1;
 	}
-
-	checker->parser = parser;
-	init_checker(checker);
-	defer (destroy_checker(checker)); // this is here because of a `goto`
+	release_held_errors();
+	defer (destroy_checker(checker));
 
 	if (build_context.cached && parser->total_seen_load_directive_count.load() == 0) {
 		MAIN_TIME_SECTION("check cached build (pre-semantic check)");
@@ -4265,12 +4699,31 @@ end_of_code_gen:;
 		show_import_graph(checker);
 	}
 
-	if (run_output) {
+	if (run_output && build_context.build_mode == BuildMode_Executable) {
 		String exe_name = path_to_string(heap_allocator(), build_context.build_paths[BuildPath_Output]);
 		defer (gb_free(heap_allocator(), exe_name.text));
 
-		system_must_exec_command_line_app("odin run", "\"%.*s\" %.*s", LIT(exe_name), LIT(run_args_string));
+#if defined(GB_SYSTEM_WINDOWS)
+		int subprocess_res = run_subprocess(exe_name, after_double_dash_raw);
+#else
+		const char* exe_name_cstring = alloc_cstring(heap_allocator(), exe_name);
+		Array<const char *> run_args_cstring = array_make<const char *>(heap_allocator(), 0, run_args.count);
+		defer({
+			for_array(i, run_args_cstring) { gb_free(heap_allocator(), (void*)run_args_cstring[i]);	}
+			array_free(&run_args_cstring);
+		});
 
+		array_add(&run_args_cstring, exe_name_cstring);
+		for_array(i, run_args) {
+			array_add(&run_args_cstring, alloc_cstring(heap_allocator(), run_args[i]));
+		}
+		array_add(&run_args_cstring, NULL);
+
+		int subprocess_res = run_subprocess(exe_name_cstring, run_args_cstring.data);
+#endif
+		if (subprocess_res) {
+			gb_exit(subprocess_res);
+		}
 		if (!build_context.keep_executable) {
 			char const *filename = cast(char const *)exe_name.text;
 			gb_file_remove(filename);

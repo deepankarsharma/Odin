@@ -71,7 +71,7 @@ fe_equal :: proc "contextless" (arg1, arg2: ^Montgomery_Domain_Field_Element) ->
 
 	// This will only underflow if and only if (⟺) arg1 == arg2, and we return the borrow,
 	// which will be 1.
-	is_eq := subtle.u64_is_zero(fe_non_zero(&tmp))
+	is_eq := subtle.eq0(fe_non_zero(&tmp))
 
 	fe_clear(&tmp)
 
@@ -235,7 +235,7 @@ fe_sqrt :: proc "contextless" (out1, arg1: ^Montgomery_Domain_Field_Element) -> 
 	fe_mul(out1, &xx, out1)
 
 	// Step 4: t0 = x^0xc
-	fe_pow2k(&t0, &xx, 2)
+	fe_pow2k(&t0, out1, 2)
 
 	// Step 5: z = x^0xf
 	fe_mul(out1, out1, &t0)

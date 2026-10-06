@@ -4,15 +4,24 @@
 A secondary param can be used to supply a custom alphabet to `encode` and a matching decoding table to `decode`.
 
 If none is supplied it just uses the standard Base64 alphabet.
-In case your specific version does not use padding, you may
-truncate it from the encoded output.
+
+By default `encode` emits padding. Encode options can omit it: with
+`{.No_Padding}` the output is the canonical unpadded ("raw") form of
+RFC 4648 section 3.2, and `encoded_len` reports the shorter length.
+
+By default `decode` is lenient, accepting padded and unpadded input and not
+checking the trailing padding bits. Decode options can enable strict
+(RFC 4648 section 3.5) canonical decoding: `{.Strict}` requires correct
+padding and zero trailing bits, while `{.Strict, .No_Padding}` accepts only
+canonical unpadded input.
 */
 package encoding_base64
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:io"
-import "core:strings"
 
+@(rodata)
 ENC_TABLE := [64]byte {
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
     'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
@@ -25,6 +34,7 @@ ENC_TABLE := [64]byte {
 }
 
 // Encoding table for Base64url variant
+@(rodata)
 ENC_URL_TABLE := [64]byte {
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
     'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
@@ -38,101 +48,165 @@ ENC_URL_TABLE := [64]byte {
 
 PADDING :: '='
 
-DEC_TABLE := [256]u8 {
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0, 62,  0,  0,  0, 63,
+@(rodata)
+DEC_TABLE := [256]i8 {
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, 62, -1, -1, -1, 63,
     52, 53, 54, 55, 56, 57, 58, 59,
-    60, 61,  0,  0,  0,  0,  0,  0,
-     0,  0,  1,  2,  3,  4,  5,  6,
+    60, 61, -1, -1, -1, -1, -1, -1,
+    -1,  0,  1,  2,  3,  4,  5,  6,
      7,  8,  9, 10, 11, 12, 13, 14,
     15, 16, 17, 18, 19, 20, 21, 22,
-    23, 24, 25,  0,  0,  0,  0,  0,
-     0, 26, 27, 28, 29, 30, 31, 32,
+    23, 24, 25, -1, -1, -1, -1, -1,
+    -1, 26, 27, 28, 29, 30, 31, 32,
     33, 34, 35, 36, 37, 38, 39, 40,
     41, 42, 43, 44, 45, 46, 47, 48,
-    49, 50, 51,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
+    49, 50, 51, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
 }
 
 // Decoding table for Base64url variant
-DEC_URL_TABLE := [256]u8 {
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0, 62,  0,  0,
+@(rodata)
+DEC_URL_TABLE := [256]i8 {
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, 62, -1, -1,
     52, 53, 54, 55, 56, 57, 58, 59,
-    60, 61,  0,  0,  0,  0,  0,  0,
-     0,  0,  1,  2,  3,  4,  5,  6,
+    60, 61, -1, -1, -1, -1, -1, -1,
+    -1,  0,  1,  2,  3,  4,  5,  6,
      7,  8,  9, 10, 11, 12, 13, 14,
     15, 16, 17, 18, 19, 20, 21, 22,
-    23, 24, 25,  0,  0,  0,  0, 63,
-     0, 26, 27, 28, 29, 30, 31, 32,
+    23, 24, 25, -1, -1, -1, -1, 63,
+    -1, 26, 27, 28, 29, 30, 31, 32,
     33, 34, 35, 36, 37, 38, 39, 40,
     41, 42, 43, 44, 45, 46, 47, 48,
-    49, 50, 51,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,
+    49, 50, 51, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
 }
 
+Error :: union #shared_nil {
+	runtime.Allocator_Error,
+	io.Error,
+	Decode_Error,
+}
 
-encode :: proc(data: []byte, ENC_TBL := ENC_TABLE, allocator := context.allocator) -> (encoded: string, err: runtime.Allocator_Error) #optional_allocator_error {
-	out_length := encoded_len(data)
+Decode_Error :: enum {
+	None,
+	Invalid_Character,
+	Invalid_Padding,
+	Non_Canonical,
+}
+
+// Decode_Option selects optional validation performed by the decode routines.
+Decode_Option :: enum {
+	// Strict requires canonical input as described in RFC 4648 section 3.5:
+	// trailing padding bits must be zero, padding must be exact, and padding
+	// characters may only appear at the end.
+	Strict,
+	// No_Padding rejects the padding character, requiring unpadded input.
+	No_Padding,
+}
+
+// Decode_Options is a set of Decode_Option values.
+Decode_Options :: bit_set[Decode_Option; u8]
+
+// Encode_Option selects optional behavior of the encode routines.
+Encode_Option :: enum {
+	// No_Padding omits the padding character from the output (RFC 4648
+	// section 3.2), producing the canonical unpadded ("raw") form.
+	// Combine with ENC_URL_TABLE for unpadded base64url, as used by JOSE.
+	No_Padding,
+}
+
+// Encode_Options is a set of Encode_Option values.
+Encode_Options :: bit_set[Encode_Option; u8]
+
+encode :: proc(data: []byte, ENC_TBL := ENC_TABLE, allocator := context.allocator, options := Encode_Options{}) -> (encoded: string, err: runtime.Allocator_Error) #optional_allocator_error {
+	out_length := encoded_len(data, options)
 	if out_length == 0 {
 		return
 	}
 
-	out   := strings.builder_make(0, out_length, allocator) or_return
-	ioerr := encode_into(strings.to_stream(&out), data, ENC_TBL)
+	out := make([]byte, out_length, allocator) or_return
+	_, ioerr := encode_impl(out, data, ENC_TBL, options)
+	assert(ioerr == nil, "encode should not IO error")
+	assert(len(out) == out_length, "buffer resized, `encoded_len` was wrong")
 
-	assert(ioerr == nil,                           "string builder should not IO error")
-	assert(strings.builder_cap(out) == out_length, "buffer resized, `encoded_len` was wrong")
+	encoded = transmute(string)(out)
 
-	return strings.to_string(out), nil
+	return
 }
 
-encode_into :: proc(w: io.Writer, data: []byte, ENC_TBL := ENC_TABLE) -> io.Error {
-	length := len(data)
-	if length == 0 {
-		return nil
+encode_into_buf :: proc(dst, data: []byte, ENC_TBL := ENC_TABLE, options := Encode_Options{}) -> (encoded: []byte, err: Error) {
+	out_length := encoded_len(data, options)
+	if out_length == 0 {
+		return
 	}
 
-	c0, c1, c2, block: int
-	out: [4]byte
+	return encode_impl(dst, data, ENC_TBL, options)
+}
+
+encode_into :: proc(w: io.Writer, data: []byte, ENC_TBL := ENC_TABLE, options := Encode_Options{}) -> io.Error {
+	_, err := encode_impl(w, data, ENC_TBL, options)
+	return err
+}
+
+@(private)
+encode_impl :: proc(dst: $T, data: []byte, ENC_TBL := ENC_TABLE, options := Encode_Options{}) -> ([]byte, io.Error) where T == io.Writer || T == []byte {
+	length := len(data)
+	when T == []byte {
+		out_length := encoded_len(data, options)
+		if len(dst) < out_length {
+			return nil, io.Error.Short_Buffer
+		}
+		buf := dst
+	} else {
+		if length == 0 {
+			return nil, nil
+		}
+		buf: [4]byte
+	}
+
+	// c0, c1, c2 are the group's input bytes; -1 marks a missing byte, which
+	// is how a partial (final) group is identified.
+	c0, c1, c2, block, write: int
 	for i := 0; i < length; i += 3 {
 		#no_bounds_check {
 			c0, c1, c2 = int(data[i]), -1, -1
@@ -140,86 +214,308 @@ encode_into :: proc(w: io.Writer, data: []byte, ENC_TBL := ENC_TABLE) -> io.Erro
 			if i + 1 < length { c1 = int(data[i + 1]) }
 			if i + 2 < length { c2 = int(data[i + 2]) }
 
+			// Pack the group into a 24-bit value, most significant input
+			// byte first; missing bytes contribute zero bits, as RFC 4648
+			// section 4 requires.
 			block = (c0 << 16) | (max(c1, 0) << 8) | max(c2, 0)
-			
-			out[0] = ENC_TBL[block >> 18 & 63]
-			out[1] = ENC_TBL[block >> 12 & 63]
-			out[2] = c1 == -1 ? PADDING : ENC_TBL[block >> 6 & 63]
-			out[3] = c2 == -1 ? PADDING : ENC_TBL[block & 63]
+
+			// Characters the final block carries once padding is dropped:
+			// four for a full group, two (one input byte) or three (two
+			// input bytes) for a partial one.
+			emit := 4
+			if c1 == -1 {
+				emit = 2
+			} else if c2 == -1 {
+				emit = 3
+			}
+
+			// Padded output still writes a full four-character block, with
+			// PADDING where the group ran out of input bytes.
+			write = emit
+			if .No_Padding not_in options {
+				write = 4
+			}
+
+			// The output characters, most significant six bits first;
+			// PADDING replaces the characters a partial group lacks.
+			buf[0] = ENC_TBL[block >> 18 & 63]
+			buf[1] = ENC_TBL[block >> 12 & 63]
+			if write > 2 {
+				buf[2] = c1 == -1 ? PADDING : ENC_TBL[block >> 6 & 63]
+				if write > 3 {
+					buf[3] = c2 == -1 ? PADDING : ENC_TBL[block & 63]
+				}
+			}
+			when T == []byte {
+				buf = buf[write:]
+			}
 		}
-		io.write_full(w, out[:]) or_return
+		when T == io.Writer {
+			if _, err := io.write_full(dst, buf[:write]); err != nil {
+				return nil, err
+			}
+		}
 	}
-	return nil
+
+	when T == io.Writer {
+		return nil, nil
+	} else {
+		return dst[:out_length], nil
+	}
 }
 
-encoded_len :: proc(data: []byte) -> int {
+encoded_len :: proc(data: []byte, options := Encode_Options{}) -> int {
 	length := len(data)
 	if length == 0 {
 		return 0
 	}
 
-	return ((4 * length / 3) + 3) &~ 3
+	padded := ((4 * length / 3) + 3) &~ 3
+	if .No_Padding not_in options {
+		return padded
+	}
+
+	switch length % 3 {
+	case 1:
+		return padded - 2
+	case 2:
+		return padded - 1
+	}
+	return padded
 }
 
-decode :: proc(data: string, DEC_TBL := DEC_TABLE, allocator := context.allocator) -> (decoded: []byte, err: runtime.Allocator_Error) #optional_allocator_error {
+@(private)
+validate_strict_decode :: proc(data: string, dec_tbl: [256]i8, options: Decode_Options) -> Decode_Error {
+	if options == {} {
+		return .None
+	}
+
+	n := len(data)
+	if n == 0 {
+		return .None
+	}
+
+	si := n
+	pad: int
+	if .No_Padding in options {
+		for i in 0 ..< n {
+			if data[i] == PADDING {
+				return .Invalid_Padding
+			}
+		}
+	} else {
+		for si > 0 && data[si - 1] == PADDING {
+			si -= 1
+			pad += 1
+		}
+		if pad > 2 {
+			return .Invalid_Padding
+		}
+		for j in 0 ..< si {
+			if data[j] == PADDING {
+				return .Invalid_Padding
+			}
+		}
+	}
+
+	rem := si % 4
+	if .No_Padding in options && rem == 1 {
+		return .Invalid_Padding
+	}
+
+	if .Strict in options {
+		if .No_Padding not_in options {
+			if n % 4 != 0 {
+				return .Invalid_Padding
+			}
+
+			switch rem {
+			case 0:
+				if pad != 0 {
+					return .Invalid_Padding
+				}
+			case 2:
+				if pad != 2 {
+					return .Invalid_Padding
+				}
+			case 3:
+				if pad != 1 {
+					return .Invalid_Padding
+				}
+			case:
+				return .Invalid_Padding
+			}
+		}
+
+		switch rem {
+		case 2:
+			c := dec_tbl[data[si - 1]]
+			if c < 0 {
+				return .Invalid_Character
+			}
+			if (c & 0x0f) != 0 {
+				return .Non_Canonical
+			}
+		case 3:
+			c := dec_tbl[data[si - 1]]
+			if c < 0 {
+				return .Invalid_Character
+			}
+			if (c & 0x03) != 0 {
+				return .Non_Canonical
+			}
+		}
+	}
+
+	return .None
+}
+
+decode :: proc(data: string, DEC_TBL := DEC_TABLE, dst: []byte = nil, allocator := context.allocator, options := Decode_Options{}) -> (decoded: []byte, err: Error) {
+	if derr := validate_strict_decode(data, DEC_TBL, options); derr != .None {
+		return nil, derr
+	}
+
 	out_length := decoded_len(data)
+	if out_length == 0 {
+		return nil, nil
+	}
 
-	out   := strings.builder_make(0, out_length, allocator) or_return
-	ioerr := decode_into(strings.to_stream(&out), data, DEC_TBL)
+	buf: []byte
+	if buf, err = make([]byte, out_length, allocator); err != nil {
+		return
+	}
 
-	assert(ioerr == nil,                           "string builder should not IO error")
-	assert(strings.builder_cap(out) == out_length, "buffer resized, `decoded_len` was wrong")
+	decoded, err = decode_impl(buf, data, DEC_TBL)
+	if err != nil {
+		delete(buf, allocator)
+	}
+	assert(err != nil || len(decoded) == out_length, "buffer unexpectedly resized, `decoded_len` was wrong")
 
-	return out.buf[:], nil
+	return
 }
 
-decode_into :: proc(w: io.Writer, data: string, DEC_TBL := DEC_TABLE) -> io.Error {
+decode_into_buf :: proc(dst: []byte, data: string, DEC_TBL := DEC_TABLE, options := Decode_Options{}) -> (decoded: []byte, err: Error) {
+	if derr := validate_strict_decode(data, DEC_TBL, options); derr != .None {
+		return nil, derr
+	}
+
+	out_length := decoded_len(data)
+	if out_length == 0 {
+		return
+	}
+
+	return decode_impl(dst, data, DEC_TBL)
+}
+
+decode_into :: proc(w: io.Writer, data: string, DEC_TBL := DEC_TABLE, options := Decode_Options{}) -> Error {
+	if derr := validate_strict_decode(data, DEC_TBL, options); derr != .None {
+		return derr
+	}
+
+	_, err := decode_impl(w, data, DEC_TBL)
+	return err
+}
+
+@(private)
+decode_impl :: proc(dst: $T, data: string, DEC_TBL := DEC_TABLE) -> ([]byte, Error) where T == io.Writer || T == []byte {
 	length := decoded_len(data)
-	if length == 0 {
-		return nil
+	when T == []byte {
+		if len(dst) < length {
+			return nil, io.Error.Short_Buffer
+		}
+		off: int
+	} else {
+		if length == 0 {
+			return nil, nil
+		}
+		buf: [3]byte
 	}
 
 	c0, c1, c2, c3: int
+	d0, d1, d2, d3: i8
 	b0, b1, b2: int
-	buf: [3]byte
 	i, j: int
 	for ; j + 3 <= length; i, j = i + 4, j + 3 {
 		#no_bounds_check {
-			c0 = int(DEC_TBL[data[i]])
-			c1 = int(DEC_TBL[data[i + 1]])
-			c2 = int(DEC_TBL[data[i + 2]])
-			c3 = int(DEC_TBL[data[i + 3]])
+			d0 = DEC_TBL[data[i]]
+			d1 = DEC_TBL[data[i + 1]]
+			d2 = DEC_TBL[data[i + 2]]
+			d3 = DEC_TBL[data[i + 3]]
+
+			if intrinsics.unlikely((d0 | d1 | d2 | d3) & ~i8(0x3f) != 0) {
+				return nil, Decode_Error.Invalid_Character
+			}
+
+			c0, c1, c2, c3 = int(d0), int(d1), int(d2), int(d3)
 
 			b0 = (c0 << 2) | (c1 >> 4)
 			b1 = (c1 << 4) | (c2 >> 2)
 			b2 = (c2 << 6) | c3
 
-			buf[0] = byte(b0)
-			buf[1] = byte(b1)
-			buf[2] = byte(b2)
+			when T == []byte {
+				dst[off+0] = byte(b0)
+				dst[off+1] = byte(b1)
+				dst[off+2] = byte(b2)
+				off += 3
+			} else {
+				buf[0] = byte(b0)
+				buf[1] = byte(b1)
+				buf[2] = byte(b2)
+			}
 		}
 
-		io.write_full(w, buf[:]) or_return
+		when T == io.Writer {
+			if _, err := io.write_full(dst, buf[:]); err != .None {
+				return nil, err
+			}
+		}
 	}
 
 	rest := length - j
 	if rest > 0 {
 		#no_bounds_check {
-			c0 = int(DEC_TBL[data[i]])
-			c1 = int(DEC_TBL[data[i + 1]])
-			c2 = int(DEC_TBL[data[i + 2]])
+			// Note: decoded_len handles removing padding.
+			d0 = DEC_TBL[data[i]]
+			d1 = DEC_TBL[data[i + 1]]
+			if d2 = 0; rest == 2 {
+				d2 = DEC_TBL[data[i + 2]]
+			}
+
+			if intrinsics.unlikely((d0 | d1 | d2) & ~i8(0x3f) != 0) {
+				return nil, Decode_Error.Invalid_Character
+			}
+
+			c0, c1, c2 = int(d0), int(d1), int(d2)
 
 			b0 = (c0 << 2) | (c1 >> 4)
 			b1 = (c1 << 4) | (c2 >> 2)
+
+			when T == []byte {
+				switch rest {
+				case 2:
+					dst[off+1] = byte(b1)
+					fallthrough
+				case 1:
+					dst[off] = byte(b0)
+				}
+			} else {
+				buf[0] = byte(b0)
+				buf[1] = byte(b1)
+			}
 		}
 
-		switch rest {
-		case 1: io.write_byte(w, byte(b0))             or_return
-		case 2: io.write_full(w, {byte(b0), byte(b1)}) or_return
+		when T == io.Writer {
+			if _, err := io.write_full(dst, buf[:rest]); err != .None {
+				return nil, err
+			}
 		}
 	}
 
-	return nil
+	when T == io.Writer {
+		return nil, nil
+	} else {
+		return dst[:length], nil
+	}
 }
 
 decoded_len :: proc(data: string) -> int {

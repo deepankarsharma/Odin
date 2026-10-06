@@ -84,6 +84,8 @@ foreign Kernel32 {
 	) -> rawptr ---
 
 	UnmapViewOfFile :: proc(lpBaseAddress: rawptr) -> b32 ---
+
+	CloseHandle :: proc(hObject: rawptr) -> b32 ---
 }
 
 @(no_sanitize_address)
@@ -146,18 +148,6 @@ _protect :: proc "contextless" (data: rawptr, size: uint, flags: Protect_Flags) 
 	return bool(ok)
 }
 
-
-@(no_sanitize_address)
-_platform_memory_init :: proc "contextless" () {
-	sys_info: SYSTEM_INFO
-	GetSystemInfo(&sys_info)
-	DEFAULT_PAGE_SIZE = max(DEFAULT_PAGE_SIZE, uint(sys_info.dwPageSize))
-	
-	// is power of two
-	assert_contextless(DEFAULT_PAGE_SIZE != 0 && (DEFAULT_PAGE_SIZE & (DEFAULT_PAGE_SIZE-1)) == 0)
-}
-
-
 @(no_sanitize_address)
 _map_file :: proc "contextless" (fd: uintptr, size: i64, flags: Map_File_Flags) -> (data: []byte, error: Map_File_Error) {
 	page_flags: u32
@@ -175,6 +165,7 @@ _map_file :: proc "contextless" (fd: uintptr, size: i64, flags: Map_File_Flags) 
 	if handle == nil {
 		return nil, .Map_Failure
 	}
+	defer CloseHandle(handle)
 
 	desired_access: u32
 	if .Read in flags {

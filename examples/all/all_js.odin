@@ -49,6 +49,7 @@ package all
 @(require) import "core:crypto/pbkdf2"
 @(require) import "core:crypto/poly1305"
 @(require) import "core:crypto/ristretto255"
+@(require) import "core:crypto/rsa"
 @(require) import "core:crypto/sha2"
 @(require) import "core:crypto/sha3"
 @(require) import "core:crypto/shake"
@@ -56,6 +57,7 @@ package all
 @(require) import "core:crypto/tuplehash"
 @(require) import "core:crypto/x25519"
 @(require) import "core:crypto/x448"
+@(require) import "core:crypto/x509"
 
 @(require) import "core:debug/pe"
 @(require) import "core:debug/trace"
@@ -71,6 +73,7 @@ package all
 @(require) import "core:encoding/hxa"
 @(require) import "core:encoding/ini"
 @(require) import "core:encoding/json"
+@(require) import "core:encoding/pem"
 @(require) import "core:encoding/varint"
 @(require) import "core:encoding/xml"
 @(require) import "core:encoding/uuid"
