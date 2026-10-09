@@ -3468,7 +3468,7 @@ gb_internal void generate_minimum_dependency_set(Checker *c, Entity *start) {
 		str_lit("multi_pointer_slice_expr_error_with_context"),
 	);
 
-	FORCE_ADD_RUNTIME_ENTITIES(c->info.objc_class_implementations.count.load(std::memory_order_relaxed) > 0,
+	FORCE_ADD_RUNTIME_ENTITIES(build_context.metrics.os == TargetOs_darwin,
 		str_lit("objc_lookUpClass"),
 		str_lit("sel_registerName"),
 		str_lit("objc_allocateClassPair"),
