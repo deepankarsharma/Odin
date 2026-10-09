@@ -456,6 +456,7 @@ enum BuildFlagKind {
 	BuildFlag_VetSemicolon,
 	BuildFlag_VetCast,
 	BuildFlag_VetTabs,
+	BuildFlag_VetExplicitAllocators,
 	BuildFlag_VetWhenShadowing,
 	BuildFlag_VetNilDeref,
 	BuildFlag_VetUninitialized,
@@ -735,6 +736,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_VetSemicolon,            str_lit("vet-semicolon"),             BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetCast,                 str_lit("vet-cast"),                  BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetTabs,                 str_lit("vet-tabs"),                  BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_VetExplicitAllocators,   str_lit("vet-explicit-allocators"),   BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetWhenShadowing,        str_lit("vet-when-shadowing"),        BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetNilDeref,             str_lit("vet-nil-deref"),             BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_VetUninitialized,        str_lit("vet-uninitialized"),         BuildFlagParam_None,    Command__does_check);
@@ -1525,6 +1527,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_VetSemicolon:        build_context.vet_flags |= VetFlag_Semicolon;        break;
 						case BuildFlag_VetCast:             build_context.vet_flags |= VetFlag_Cast;             break;
 						case BuildFlag_VetTabs:             build_context.vet_flags |= VetFlag_Tabs;             break;
+						case BuildFlag_VetExplicitAllocators: build_context.vet_flags |= VetFlag_ExplicitAllocators; break;
 						case BuildFlag_VetWhenShadowing:    build_context.vet_flags |= VetFlag_WhenShadowing;    break;
 						case BuildFlag_VetNilDeref:         build_context.vet_flags |= VetFlag_NilDeref;         break;
 						case BuildFlag_VetUninitialized:    build_context.vet_flags |= VetFlag_Uninitialized;    break;
