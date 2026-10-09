@@ -63,8 +63,35 @@ _mkdir_all :: proc(path: string, perm: Permissions) -> Error {
 	dfd: linux.Fd
 	errno: linux.Errno
 	if path_bytes[0] == '/' {
-		dfd, errno = linux.open("/", _OPENDIR_FLAGS)
-		path_bytes = path_bytes[1:]
+		// Start at the deepest ancestor that already exists rather than "/",
+		// which sandboxes such as Android's app SELinux domain may not open.
+		split := len(path)
+		for split > 0 {
+			saved := path_bytes[split]
+			path_bytes[split] = 0
+			dfd, errno = linux.open(cstring(&path_bytes[0]), _OPENDIR_FLAGS)
+			path_bytes[split] = saved
+			if errno == .NONE {
+				break
+			}
+			split -= 1
+			for split > 0 && path_bytes[split] != '/' {
+				split -= 1
+			}
+		}
+		if split == 0 {
+			dfd, errno = linux.open("/", _OPENDIR_FLAGS)
+			path_bytes = path_bytes[1:]
+		} else {
+			for split < len(path) && path_bytes[split] == '/' {
+				split += 1
+			}
+			if split == len(path) {
+				linux.close(dfd)
+				return .Exist
+			}
+			path_bytes = path_bytes[split:]
+		}
 	} else {
 		dfd, errno = linux.open(".", _OPENDIR_FLAGS)
 	}
