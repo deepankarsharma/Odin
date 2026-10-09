@@ -180,6 +180,15 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 		lb_add_attribute_to_proc(m, p->value, "nonlazybind");
 	}
 
+	// Debug builds keep a frame-pointer chain and asynchronous unwind tables in
+	// every procedure, so crash reporters, debuggers and sanitizers can walk an
+	// Odin stack on targets whose LLVM default omits both (aarch64 Android among
+	// them). Optimized builds are unchanged.
+	if (build_context.ODIN_DEBUG) {
+		lb_add_attribute_to_proc_with_string(m, p->value, str_lit("frame-pointer"), str_lit("all"));
+		lb_add_attribute_to_proc(m, p->value, "uwtable", 2); // UWTableKind::Async
+	}
+
 	switch (build_context.stack_protector) {
 		case StackProtector_Ssp:
 			lb_add_attribute_to_proc(m, p->value, "ssp");
