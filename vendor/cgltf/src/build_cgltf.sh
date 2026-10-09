@@ -21,8 +21,8 @@ build_unix() {
 
 build_darwin() {
 	mkdir -p ../lib/darwin
-	$cc -arch x86_64 -c -O2 -Os -fPIC cgltf.c -o cgltf-x86_64.o -mmacosx-version-min=10.12
-	$cc -arch arm64  -c -O2 -Os -fPIC cgltf.c -o cgltf-arm64.o -mmacosx-version-min=10.12
+	$cc -arch x86_64 -c -O2 -Os -fPIC cgltf.c -o cgltf-x86_64.o -mmacosx-version-min=11.0
+	$cc -arch arm64  -c -O2 -Os -fPIC cgltf.c -o cgltf-arm64.o -mmacosx-version-min=11.0
 	lipo -create cgltf-x86_64.o cgltf-arm64.o -output ../lib/darwin/cgltf.a
 	rm ./*.o
 }
