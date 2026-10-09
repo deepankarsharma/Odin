@@ -1910,8 +1910,10 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								build_context.sanitizer_flags |= SanitizerFlag_Memory;
 							} else if (str_eq_ignore_case(value.value_string, str_lit("thread"))) {
 								build_context.sanitizer_flags |= SanitizerFlag_Thread;
+							} else if (str_eq_ignore_case(value.value_string, str_lit("hwaddress"))) {
+								build_context.sanitizer_flags |= SanitizerFlag_HWAddress;
 							} else {
-								gb_printf_err("-sanitize:<string> options are 'address', 'memory', and 'thread'\n");
+								gb_printf_err("-sanitize:<string> options are 'address', 'hwaddress', 'memory', and 'thread'\n");
 								bad_flags = true;
 							}
 							break;
@@ -3441,6 +3443,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "Enables sanitization analysis.");
 			print_usage_line(2, "Available options:");
 				print_usage_line(3, "-sanitize:address");
+				print_usage_line(3, "-sanitize:hwaddress  (arm64 Linux and Android)");
 				print_usage_line(3, "-sanitize:memory");
 				print_usage_line(3, "-sanitize:thread");
 		}

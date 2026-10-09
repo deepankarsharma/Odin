@@ -696,9 +696,10 @@ ODIN_PLATFORM_SUBTARGET_IOS :: ODIN_PLATFORM_SUBTARGET == .iPhone || ODIN_PLATFO
 /*
 	// Defined internally by the compiler
 	Odin_Sanitizer_Flag :: enum u32 {
-		Address = 0,
-		Memory  = 1,
-		Thread  = 2,
+		Address   = 0,
+		Memory    = 1,
+		Thread    = 2,
+		HWAddress = 3,
 	}
 	Odin_Sanitizer_Flags :: distinct bit_set[Odin_Sanitizer_Flag; u32]
 

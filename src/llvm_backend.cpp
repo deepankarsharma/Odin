@@ -2992,6 +2992,9 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 		if (build_context.sanitizer_flags & SanitizerFlag_Address) {
 			array_add(&passes, "asan");
 		}
+		if (build_context.sanitizer_flags & SanitizerFlag_HWAddress) {
+			array_add(&passes, "hwasan");
+		}
 		if (build_context.sanitizer_flags & SanitizerFlag_Memory) {
 			array_add(&passes, "msan");
 		}
@@ -3749,6 +3752,17 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 		llvm_features = gb_string_append_length(llvm_features, str.text, str.len);
 	}
 
+	if (build_context.sanitizer_flags & SanitizerFlag_HWAddress) {
+		// HWASan gives each global an address tag. Without tagged-globals the
+		// backend forms their addresses with a plain ADRP, whose relocation
+		// overflows on the tag; clang's driver adds the feature for the same reason.
+		if (!first) {
+			llvm_features = gb_string_appendc(llvm_features, ",");
+		}
+		first = false;
+		llvm_features = gb_string_appendc(llvm_features, "+tagged-globals");
+	}
+
 	debugf("CPU: %.*s, Features: %s\n", LIT(llvm_cpu), llvm_features);	
 
 	// GB_ASSERT_MSG(LLVMTargetHasAsmBackend(target));
@@ -4321,6 +4335,13 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 				build_context.extra_linker_flags = concatenate_strings(permanent_allocator(), build_context.extra_linker_flags, str_lit(" -fsanitize=address"));
 			}
 			break;
+		}
+	}
+	if (build_context.sanitizer_flags & SanitizerFlag_HWAddress) {
+		if (!build_context.extra_linker_flags.text) {
+			build_context.extra_linker_flags = str_lit("-fsanitize=hwaddress");
+		} else {
+			build_context.extra_linker_flags = concatenate_strings(permanent_allocator(), build_context.extra_linker_flags, str_lit(" -fsanitize=hwaddress"));
 		}
 	}
 	if (build_context.sanitizer_flags & SanitizerFlag_Memory) {

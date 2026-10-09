@@ -441,6 +441,9 @@ enum SanitizerFlags : u32 {
 	SanitizerFlag_Address = 1u<<0,
 	SanitizerFlag_Memory  = 1u<<1,
 	SanitizerFlag_Thread  = 1u<<2,
+	// Hardware-assisted AddressSanitizer: pointer tags in the top byte, which
+	// arm64's top-byte-ignore lets through. Android's sanitizer of choice.
+	SanitizerFlag_HWAddress = 1u<<3,
 };
 
 struct BuildCacheData {
@@ -2659,6 +2662,13 @@ gb_internal bool init_build_paths(String init_filename) {
 			break;
 		default:
 			gb_printf_err("-sanitize:thread is only supported on Linux, Darwin, and FreeBSD\n");
+			return false;
+		}
+	}
+
+	if (build_context.sanitizer_flags & SanitizerFlag_HWAddress) {
+		if (build_context.metrics.os != TargetOs_linux || build_context.metrics.arch != TargetArch_arm64) {
+			gb_printf_err("-sanitize:hwaddress is only supported on arm64 Linux, Android included\n");
 			return false;
 		}
 	}

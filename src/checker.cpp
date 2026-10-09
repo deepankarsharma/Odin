@@ -1482,10 +1482,11 @@ gb_internal void init_universal(void) {
 	}
 
 	{
-		GlobalEnumValue values[3] = {
-			{"Address", 0},
-			{"Memory",  1},
-			{"Thread",  2},
+		GlobalEnumValue values[4] = {
+			{"Address",   0},
+			{"Memory",    1},
+			{"Thread",    2},
+			{"HWAddress", 3},
 		};
 
 		Type *enum_type = nullptr;
@@ -1494,7 +1495,7 @@ gb_internal void init_universal(void) {
 		bit_set_type->BitSet.elem = enum_type;
 		bit_set_type->BitSet.underlying = t_u32;
 		bit_set_type->BitSet.lower = 0;
-		bit_set_type->BitSet.upper = 2;
+		bit_set_type->BitSet.upper = gb_count_of(values) - 1;
 		type_size_of(bit_set_type);
 
 		String type_name = str_lit("Odin_Sanitizer_Flags");
