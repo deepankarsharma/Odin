@@ -4,7 +4,26 @@ package mem_virtual
 
 import "core:sys/linux"
 
+when .Thread in ODIN_SANITIZER_FLAGS {
+	foreign import kaho_tsan_libc "system:c"
+	@(default_calling_convention = "c")
+	foreign kaho_tsan_libc {
+		@(link_name = "mmap")
+		kaho_tsan_mmap :: proc(addr: rawptr, length: uint, prot, flags, fd: i32, offset: i64) -> rawptr ---
+		@(link_name = "munmap")
+		kaho_tsan_munmap :: proc(addr: rawptr, length: uint) -> i32 ---
+	}
+}
+
 _reserve :: proc "contextless" (size: uint, address_hint: uintptr) -> (data: []byte, err: Allocator_Error) {
+	when .Thread in ODIN_SANITIZER_FLAGS {
+		MAP_PRIVATE_ANONYMOUS :: 0x22
+		mapped := kaho_tsan_mmap(rawptr(address_hint), size, 0, MAP_PRIVATE_ANONYMOUS, -1, 0)
+		if uintptr(mapped) == ~uintptr(0) {
+			return nil, .Out_Of_Memory
+		}
+		return (cast([^]byte)mapped)[:size], nil
+	}
 	addr, errno := linux.mmap(address_hint, size, {}, {.PRIVATE, .ANONYMOUS})
 	if errno == .ENOMEM {
 		return nil, .Out_Of_Memory
@@ -30,7 +49,11 @@ _decommit :: proc "contextless" (data: rawptr, size: uint) {
 }
 
 _release :: proc "contextless" (data: rawptr, size: uint) {
-	_ = linux.munmap(data, size)
+	when .Thread in ODIN_SANITIZER_FLAGS {
+		_ = kaho_tsan_munmap(data, size)
+	} else {
+		_ = linux.munmap(data, size)
+	}
 }
 
 _protect :: proc "contextless" (data: rawptr, size: uint, flags: Protect_Flags) -> bool {
