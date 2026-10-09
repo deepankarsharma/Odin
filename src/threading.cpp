@@ -553,7 +553,7 @@ gb_internal u32 thread_current_id(void) {
 #elif defined(GB_ARCH_64_BIT) && defined(GB_CPU_X86)
 	__asm__("mov %%fs:0x10,%0" : "=r"(thread_id));
 #elif defined(GB_SYSTEM_LINUX)
-	thread_id = gettid();
+	thread_id = (u32)syscall(SYS_gettid);
 #elif defined(GB_SYSTEM_FREEBSD)
 	thread_id = pthread_getthreadid_np();
 #elif defined(GB_SYSTEM_NETBSD)
