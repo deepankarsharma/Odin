@@ -19,12 +19,25 @@ build_unix() {
 	rm ./*.o
 }
 
+# Each Darwin library is a fat static archive: one ar archive per
+# architecture, combined with lipo. lipo over bare objects yields a fat object
+# under an .a name, which the linker loads whole every time the library
+# appears on the command line, so a library listed twice failed with duplicate
+# symbols. An archive contributes each member once.
+darwin_archive() {
+	name=$1
+	for arch in x86_64 arm64; do
+		$cc -arch $arch -c -O2 -Os -fPIC "$name.c" -o "$name-$arch.o" -mmacosx-version-min=11.0
+		rm -f "$name-$arch.a"
+		$ar rcs "$name-$arch.a" "$name-$arch.o"
+	done
+	lipo -create "$name-x86_64.a" "$name-arm64.a" -output "../lib/darwin/$name.a"
+	rm -f "$name-x86_64.o" "$name-arm64.o" "$name-x86_64.a" "$name-arm64.a"
+}
+
 build_darwin() {
 	mkdir -p ../lib/darwin
-	$cc -arch x86_64 -c -O2 -Os -fPIC cgltf.c -o cgltf-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC cgltf.c -o cgltf-arm64.o -mmacosx-version-min=11.0
-	lipo -create cgltf-x86_64.o cgltf-arm64.o -output ../lib/darwin/cgltf.a
-	rm ./*.o
+	darwin_archive cgltf
 }
 
 case $1 in

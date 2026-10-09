@@ -36,30 +36,31 @@ build_unix() {
 	rm *.o
 }
 
+# Each Darwin library is a fat static archive: one ar archive per
+# architecture, combined with lipo. lipo over bare objects yields a fat object
+# under an .a name, which the linker loads whole every time the library
+# appears on the command line, so a library listed twice failed with duplicate
+# symbols. An archive contributes each member once.
+darwin_archive() {
+	name=$1
+	for arch in x86_64 arm64; do
+		$cc -arch $arch -c -O2 -Os -fPIC "$name.c" -o "$name-$arch.o" -mmacosx-version-min=11.0
+		rm -f "$name-$arch.a"
+		$ar rcs "$name-$arch.a" "$name-$arch.o"
+	done
+	lipo -create "$name-x86_64.a" "$name-arm64.a" -output "../lib/darwin/$name.a"
+	rm -f "$name-x86_64.o" "$name-arm64.o" "$name-x86_64.a" "$name-arm64.a"
+}
+
 build_darwin() {
-	mkdir -p ../lib
-	$cc -arch x86_64 -c -O2 -Os -fPIC stb_image.c -o stb_image-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC stb_image.c -o stb_image-arm64.o -mmacosx-version-min=11.0
-	lipo -create stb_image-x86_64.o stb_image-arm64.o -output ../lib/darwin/stb_image.a
-	$cc -arch x86_64 -c -O2 -Os -fPIC stb_image_write.c -o stb_image_write-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC stb_image_write.c -o stb_image_write-arm64.o -mmacosx-version-min=11.0
-	lipo -create stb_image_write-x86_64.o stb_image_write-arm64.o -output ../lib/darwin/stb_image_write.a
-	$cc -arch x86_64 -c -O2 -Os -fPIC stb_image_resize.c -o stb_image_resize-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC stb_image_resize.c -o stb_image_resize-arm64.o -mmacosx-version-min=11.0
-	lipo -create stb_image_resize-x86_64.o stb_image_resize-arm64.o -output ../lib/darwin/stb_image_resize.a
-	$cc -arch x86_64 -c -O2 -Os -fPIC stb_truetype.c -o stb_truetype-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC stb_truetype.c -o stb_truetype-arm64.o -mmacosx-version-min=11.0
-	lipo -create stb_truetype-x86_64.o stb_truetype-arm64.o -output ../lib/darwin/stb_truetype.a
-	$cc -arch x86_64 -c -O2 -Os -fPIC stb_rect_pack.c -o stb_rect_pack-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC stb_rect_pack.c -o stb_rect_pack-arm64.o -mmacosx-version-min=11.0
-	lipo -create stb_rect_pack-x86_64.o stb_rect_pack-arm64.o -output ../lib/darwin/stb_rect_pack.a
-	$cc -arch x86_64 -c -O2 -Os -fPIC stb_vorbis.c -o stb_vorbis-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC stb_vorbis.c -o stb_vorbis-arm64.o -mmacosx-version-min=11.0
-	lipo -create stb_vorbis-x86_64.o stb_vorbis-arm64.o -output ../lib/darwin/stb_vorbis.a
-	$cc -arch x86_64 -c -O2 -Os -fPIC stb_sprintf.c -o stb_sprintf-x86_64.o -mmacosx-version-min=11.0
-	$cc -arch arm64  -c -O2 -Os -fPIC stb_sprintf.c -o stb_sprintf-arm64.o -mmacosx-version-min=11.0
-	lipo -create stb_sprintf-x86_64.o stb_sprintf-arm64.o -output ../lib/darwin/stb_sprintf.a
-	rm ./*.o
+	mkdir -p ../lib/darwin
+	darwin_archive stb_image
+	darwin_archive stb_image_write
+	darwin_archive stb_image_resize
+	darwin_archive stb_truetype
+	darwin_archive stb_rect_pack
+	darwin_archive stb_vorbis
+	darwin_archive stb_sprintf
 }
 
 cd "$ODIN_ROOT/vendor/stb/src" || exit 1
