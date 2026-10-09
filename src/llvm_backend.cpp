@@ -3694,6 +3694,16 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	}
 
 	char const *target_triple = alloc_cstring(permanent_allocator(), build_context.metrics.target_triplet);
+	if (build_context.metrics.os == TargetOs_linux && selected_subtarget == Subtarget_Android) {
+		// LLVM parses "aarch64-linux-android" as vendor "linux" with no
+		// environment, so isAndroid() is false and neither the Android ABI
+		// (x18 reserved, the TLS model) nor Android's sanitizer runtimes apply.
+		// Give LLVM the normalized triple with the API level, as clang's
+		// --target=aarch64-linux-android<level> does.
+		char *normalized = LLVMNormalizeTargetTriple(target_triple);
+		target_triple = alloc_cstring(permanent_allocator(), make_string_c(gb_bprintf("%s%d", normalized, build_context.ODIN_ANDROID_API_LEVEL)));
+		LLVMDisposeMessage(normalized);
+	}
 	for (auto const &entry : gen->modules) {
 		LLVMSetTarget(entry.value->mod, target_triple);
 	}
