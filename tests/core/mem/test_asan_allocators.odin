@@ -104,7 +104,8 @@ test_asan_runtime_arena :: proc(t: ^testing.T) {
 @(test)
 test_asan_rollback_stack :: proc(t: ^testing.T) {
 	stack: mem.Rollback_Stack
-	testing.expect_value(t, mem.rollback_stack_init(&stack, 4096, runtime.heap_allocator()), nil)
+	// Blocks that hold every piece, so each freed one stays the stack's.
+	testing.expect_value(t, mem.rollback_stack_init(&stack, 16 * 1024, runtime.heap_allocator()), nil)
 	defer mem.rollback_stack_destroy(&stack)
 	allocator := mem.rollback_stack_allocator(&stack)
 
@@ -130,6 +131,12 @@ test_asan_rollback_stack :: proc(t: ^testing.T) {
 	m, _ := runtime.mem_resize(raw_data(s), 12, 200, 8, allocator)
 	expect_handed_out(t, m)
 	expect_dead(t, s)
+
+	// A piece too large for a block gets a block of its own. Freeing it hands that block back to
+	// the heap, which decides whether the bytes are poisoned: ASan's heap does, HeapFree does not.
+	big, _ := runtime.mem_alloc(32 * 1024, 8, allocator)
+	expect_handed_out(t, big)
+	mem.free_bytes(big, allocator)
 
 	mem.free_all(allocator)
 	expect_dead(t, m)
