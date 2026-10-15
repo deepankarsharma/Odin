@@ -6,6 +6,42 @@ Address_Death_Callback :: #type proc "c" (pc: rawptr, bp: rawptr, sp: rawptr, ad
 @(private="file")
 ASAN_ENABLED :: .Address in ODIN_SANITIZER_FLAGS
 
+/*
+Whether the program is built with `-sanitize:address`.
+*/
+ADDRESS_SANITIZER :: ASAN_ENABLED
+
+/*
+How an allocator that hands out pieces of a larger buffer lays them out for AddressSanitizer.
+
+ASan's shadow memory describes each 8-byte granule with one byte, which can only say "the first k
+bytes of this granule are addressable". A piece that shared a granule with the next could neither
+be poisoned past its end nor unpoisoned without its neighbor, and a read a few bytes past it would
+land in the next piece unseen. So, as ASan's own allocator does, an allocator built with
+`-sanitize:address` starts every piece on a granule (`address_align`) and leaves a poisoned redzone
+of `ADDRESS_REDZONE` bytes after it; it unpoisons only the bytes it hands out, and poisons them
+again when they are freed, rolled back or reset. Its memory past what it has handed out is always
+poisoned, so a reset poisons only the bytes that were in use.
+
+Without `-sanitize:address` both cost nothing: the granule is 1 byte and the redzone 0.
+*/
+ADDRESS_GRANULE :: 8 when ASAN_ENABLED else 1
+ADDRESS_REDZONE :: 32 when ASAN_ENABLED else 0
+
+/*
+The alignment a piece of a larger buffer takes: at least a shadow granule under ASan.
+*/
+address_align :: #force_inline proc "contextless" (alignment: int) -> int {
+	return max(alignment, ADDRESS_GRANULE)
+}
+
+/*
+The bytes a piece of `size` takes from its buffer: `size` and, under ASan, the redzone after it.
+*/
+address_padded :: #force_inline proc "contextless" (size: int) -> int {
+	return size + ADDRESS_REDZONE
+}
+
 @(private="file")
 @(default_calling_convention="system")
 foreign {

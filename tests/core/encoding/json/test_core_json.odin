@@ -5,6 +5,7 @@ import "core:testing"
 import "core:unicode/utf8"
 import "core:mem/virtual"
 import "base:runtime"
+import "base:sanitizer"
 
 @test
 parse_json :: proc(t: ^testing.T) {
@@ -87,7 +88,10 @@ out_of_memory_in_parse_json :: proc(t: ^testing.T) {
 @test
 out_of_memory_in_unmarshal :: proc(t: ^testing.T) {
 	arena: virtual.Arena
-	arena_buffer: [128]byte
+	// Under AddressSanitizer each of the unmarshal's allocations (7 of them) also takes a redzone
+	// and granule alignment from the buffer (see `sanitizer.ADDRESS_GRANULE`): room for one
+	// unmarshal still, and not for two.
+	arena_buffer: [128 + 8 * (sanitizer.ADDRESS_REDZONE + sanitizer.ADDRESS_GRANULE - 1)]byte
 	arena_init_error := virtual.arena_init_buffer(&arena, arena_buffer[:])
 	testing.expectf(t, arena_init_error == nil, "Expected arena initialization to not return error, got: %v\n", arena_init_error)
 

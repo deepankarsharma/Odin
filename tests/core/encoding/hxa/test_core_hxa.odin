@@ -14,7 +14,7 @@ test_read :: proc(t: ^testing.T) {
 	file, err := hxa.read(data)
 	file.backing = data
 	file.allocator = context.allocator
-	hxa.file_destroy(file)
+	defer hxa.file_destroy(file)
 
 	e :: hxa.Read_Error.None
 	testing.expectf(t, err == e, "read_from_file(%v) -> %v != %v", TEAPOT_PATH, err, e)
