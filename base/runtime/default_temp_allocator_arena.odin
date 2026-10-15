@@ -1,7 +1,7 @@
 package runtime
 
 import "base:intrinsics"
-// import "base:sanitizer"
+import "base:sanitizer"
 
 DEFAULT_ARENA_GROWING_MINIMUM_BLOCK_SIZE :: uint(DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE)
 
@@ -15,6 +15,10 @@ Memory_Block :: struct {
 
 // NOTE: This is a growing arena that is only used for the default temp allocator.
 // For your own growing arena needs, prefer `Arena` from `core:mem/virtual`.
+//
+// Under AddressSanitizer every allocation starts on a shadow granule and is followed by a
+// poisoned redzone, and only the bytes handed out are unpoisoned, so a read past an allocation
+// or of memory rolled back is reported (see `sanitizer.ADDRESS_GRANULE`).
 Arena :: struct {
 	backing_allocator:  Allocator,
 	curr_block:         ^Memory_Block,
@@ -50,7 +54,7 @@ memory_block_alloc :: proc(allocator: Allocator, capacity: uint, alignment: uint
 	block.base = ([^]byte)(uintptr(block) + uintptr(base_offset))
 	block.capacity = uint(end - uintptr(block.base))
 
-	// sanitizer.address_poison(block.base, block.capacity)
+	sanitizer.address_poison(block.base, block.capacity)
 
 	assert(block.used == 0)
 	assert(block.prev == nil)
@@ -61,7 +65,7 @@ memory_block_dealloc :: proc "contextless" (block_to_free: ^Memory_Block, loc :=
 	if block_to_free != nil {
 
 		allocator := block_to_free.allocator
-		// sanitizer.address_unpoison(block_to_free.base, block_to_free.capacity)
+		sanitizer.address_unpoison(block_to_free.base, block_to_free.capacity)
 		context = default_context()
 		context.allocator = allocator
 		mem_free(block_to_free, allocator, loc)
@@ -83,9 +87,11 @@ alloc_from_memory_block :: proc(block: ^Memory_Block, min_size, alignment: uint)
 	if block == nil {
 		return nil, .Out_Of_Memory
 	}
-	alignment_offset := calc_alignment_offset(block, uintptr(alignment))
-	size, size_ok := safe_add(min_size, alignment_offset)
-	if !size_ok {
+	piece_alignment := uint(sanitizer.address_align(int(alignment)))
+	alignment_offset := calc_alignment_offset(block, uintptr(piece_alignment))
+	padded, padded_ok := safe_add(min_size, uint(sanitizer.ADDRESS_REDZONE))
+	size, size_ok := safe_add(padded, alignment_offset)
+	if !padded_ok || !size_ok {
 		err = .Out_Of_Memory
 		return
 	}
@@ -95,7 +101,7 @@ alloc_from_memory_block :: proc(block: ^Memory_Block, min_size, alignment: uint)
 		return
 	}
 	data = block.base[block.used+alignment_offset:][:min_size]
-	// sanitizer.address_unpoison(block.base[block.used:block.used+size])
+	sanitizer.address_unpoison(data)
 	block.used += size
 	return
 }
@@ -116,7 +122,7 @@ arena_alloc :: proc(arena: ^Arena, size, alignment: uint, loc := #caller_locatio
 			arena.minimum_block_size = DEFAULT_ARENA_GROWING_MINIMUM_BLOCK_SIZE
 		}
 
-		needed := align_forward_uint(size, alignment)
+		needed := align_forward_uint(uint(sanitizer.address_padded(int(size))), alignment)
 		block_size := max(needed, arena.minimum_block_size)
 
 		if arena.backing_allocator.procedure == nil {
@@ -163,10 +169,12 @@ arena_free_all :: proc(arena: ^Arena, loc := #caller_location) {
 		arena_free_last_memory_block(arena, loc)
 	}
 
-	if arena.curr_block != nil {
-		intrinsics.mem_zero(arena.curr_block.base, arena.curr_block.used)
-		arena.curr_block.used = 0
-		// sanitizer.address_poison(arena.curr_block.base, arena.curr_block.capacity)
+	if block := arena.curr_block; block != nil {
+		// Zeroing reads nothing, but ASan checks a memset's bytes all the same.
+		sanitizer.address_unpoison(block.base, block.used)
+		intrinsics.mem_zero(block.base, block.used)
+		sanitizer.address_poison(block.base, block.used)
+		block.used = 0
 	}
 	arena.total_used = 0
 }
@@ -201,6 +209,9 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 	case .Alloc, .Alloc_Non_Zeroed:
 		return arena_alloc(arena, size, alignment, location)
 	case .Free:
+		// The arena reuses nothing freed, but under ASan freed bytes of a known size are
+		// poisoned, so a use after the free is reported.
+		sanitizer.address_poison(old_memory, int(old_size))
 		err = .Mode_Not_Implemented
 	case .Free_All:
 		arena_free_all(arena, location)
@@ -221,19 +232,21 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 			if size < old_size {
 				// shrink data in-place
 				data = old_data[:size]
+				sanitizer.address_poison(old_data[size:old_size])
 				return
 			}
 
 			if block := arena.curr_block; block != nil {
+				redzone := uint(sanitizer.ADDRESS_REDZONE)
 				start := uint(uintptr(old_memory)) - uint(uintptr(block.base))
 				old_end := start + old_size
 				new_end := start + size
-				if start < old_end && old_end == block.used && new_end <= block.capacity {
+				if start < old_end && old_end + redzone == block.used && new_end + redzone <= block.capacity {
 					// grow data in-place, adjusting next allocation
-					block.used = uint(new_end)
+					block.used = uint(new_end + redzone)
 					arena.total_used += size - old_size
 					data = block.base[start:new_end]
-					// sanitizer.address_unpoison(data)
+					sanitizer.address_unpoison(data)
 					return
 				}
 			}
@@ -244,6 +257,8 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 			return
 		}
 		copy(new_memory, old_data[:old_size])
+		// The bytes left behind are dead, as freed ones are.
+		sanitizer.address_poison(old_data[:old_size])
 		return new_memory, nil
 	case .Query_Features:
 		set := (^Allocator_Mode_Set)(old_memory)
@@ -306,8 +321,10 @@ arena_temp_end :: proc(temp: Arena_Temp, loc := #caller_location) {
 		if block := arena.curr_block; block != nil {
 			assert(block.used >= temp.used, "out of order use of arena_temp_end", loc)
 			amount_to_zero := block.used-temp.used
+			// Zeroing reads nothing, but ASan checks a memset's bytes all the same.
+			sanitizer.address_unpoison(block.base[temp.used:block.used])
 			intrinsics.mem_zero(block.base[temp.used:], amount_to_zero)
-			// sanitizer.address_poison(block.base[temp.used:block.capacity])
+			sanitizer.address_poison(block.base[temp.used:block.used])
 			block.used = temp.used
 			arena.total_used -= amount_to_zero
 		}

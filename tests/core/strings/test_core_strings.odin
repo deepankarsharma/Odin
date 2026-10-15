@@ -1,5 +1,6 @@
 package test_core_strings
 
+import "base:sanitizer"
 import "base:runtime"
 import "core:mem"
 import "core:strings"
@@ -194,7 +195,9 @@ test_builder_to_cstring_with_nil_allocator :: proc(t: ^testing.T) {
 
 @test
 test_builder_to_cstring :: proc(t: ^testing.T) {
-	buf: [8]byte
+	// Under AddressSanitizer the arena also takes a redzone and granule alignment for the
+	// builder's one allocation (see `sanitizer.ADDRESS_GRANULE`).
+	buf: [8 + sanitizer.ADDRESS_REDZONE + sanitizer.ADDRESS_GRANULE - 1]byte
 	a: mem.Arena
 	mem.arena_init(&a, buf[:])
 

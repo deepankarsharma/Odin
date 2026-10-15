@@ -98,7 +98,7 @@ parse_file_tags :: proc(file: ast.File, allocator := context.allocator) -> (tags
 
 	parse_tag :: proc(text: string, tags: ^File_Tags, build_kinds: ^[dynamic]Build_Kind,
 	                  build_project_name_strings: ^[dynamic]string,
-	                  build_project_names: ^[dynamic][]string) {
+	                  build_project_name_ends: ^[dynamic]int) {
 		i := 0
 
 		skip_whitespace(text, &i)
@@ -121,9 +121,9 @@ parse_file_tags :: proc(file: ast.File, allocator := context.allocator) -> (tags
 				}
 			case "build-project-name":
 				groups_loop: for {
-					index_start := len(build_project_name_strings)
-
-					defer append(build_project_names, build_project_name_strings[index_start:])
+					// A group's names run from where the one before it ends to here. They are
+					// sliced out once every name is in, since appending may move them.
+					defer append(build_project_name_ends, len(build_project_name_strings))
 
 					for {
 						skip_whitespace(text, &i)
@@ -144,8 +144,6 @@ parse_file_tags :: proc(file: ast.File, allocator := context.allocator) -> (tags
 						scan_value(text, &i)
 						append(build_project_name_strings, text[name_start:i])
 					}
-
-					append(build_project_names, build_project_name_strings[index_start:])
 				}
 			case "build":
 
@@ -212,9 +210,10 @@ parse_file_tags :: proc(file: ast.File, allocator := context.allocator) -> (tags
 	}
 
 	build_kinds: [dynamic]Build_Kind
-	build_project_names: [dynamic][]string
 
 	build_project_name_strings: [dynamic]string
+	build_project_name_ends:    [dynamic]int
+	defer delete(build_project_name_ends)
 
 
 	if file.docs != nil {
@@ -224,7 +223,7 @@ parse_file_tags :: proc(file: ast.File, allocator := context.allocator) -> (tags
 			}
 			text := comment.text[2:]
 
-			parse_tag(text, &tags, &build_kinds, &build_project_name_strings, &build_project_names)
+			parse_tag(text, &tags, &build_kinds, &build_project_name_strings, &build_project_name_ends)
 		}
 	}
 
@@ -235,15 +234,22 @@ parse_file_tags :: proc(file: ast.File, allocator := context.allocator) -> (tags
 		// Only skip # because parse_tag skips the plus
 		text := tag.text[1:]
 
-		parse_tag(text, &tags, &build_kinds, &build_project_name_strings, &build_project_names)
+		parse_tag(text, &tags, &build_kinds, &build_project_name_strings, &build_project_name_ends)
 	}
 
 	shrink(&build_kinds)
-	shrink(&build_project_names)
-	delete(build_project_name_strings)
-
 	tags.build = build_kinds[:]
-	tags.build_project_name = build_project_names[:]
+
+	// The groups are slices of the names, which the tags keep.
+	shrink(&build_project_name_strings)
+	if len(build_project_name_ends) > 0 {
+		tags.build_project_name = make([][]string, len(build_project_name_ends))
+		start := 0
+		for end, k in build_project_name_ends {
+			tags.build_project_name[k] = build_project_name_strings[start:end]
+			start = end
+		}
+	}
 
 	return
 }

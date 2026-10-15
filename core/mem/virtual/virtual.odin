@@ -2,7 +2,7 @@ package mem_virtual
 
 import "core:mem"
 import "base:intrinsics"
-// import "base:sanitizer"
+import "base:sanitizer"
 import "base:runtime"
 _ :: runtime
 
@@ -114,6 +114,46 @@ memory_block_alloc :: proc(committed, reserved: uint, alignment: uint = 0, flags
 	return &pmblock.block, nil
 }
 
+/*
+Commit enough of `block` for `size` more bytes past its use.
+
+Under AddressSanitizer the newly committed bytes are poisoned: they are past the block's use, and
+become addressable only as they are handed out. (`memory_block_dealloc` unpoisons the committed
+bytes before the block is released.)
+*/
+@(require_results, no_sanitize_address)
+memory_block_commit_for :: proc(block: ^Memory_Block, size: uint, default_commit_size: uint) -> (err: Allocator_Error) {
+	if block.committed - block.used < size {
+		pmblock := (^Platform_Memory_Block)(block)
+		base_offset := uint(uintptr(pmblock.block.base) - uintptr(pmblock))
+
+		// NOTE(bill): [Heuristic] grow the commit size larger than needed
+		// TODO(bill): determine a better heuristic for this behaviour
+		extra_size := max(size, block.committed>>1)
+		platform_total_commit := base_offset + block.used + extra_size
+		platform_total_commit = align_formula(platform_total_commit, uint(mem.PAGE_SIZE))
+		platform_total_commit = min(max(platform_total_commit, default_commit_size), pmblock.reserved)
+
+		assert(pmblock.committed <= pmblock.reserved)
+		assert(pmblock.committed < platform_total_commit)
+
+		platform_memory_commit(pmblock, platform_total_commit) or_return
+
+		pmblock.committed = platform_total_commit
+		old_committed := block.committed
+		block.committed = pmblock.committed - base_offset
+		assert(block.committed <= block.reserved)
+		sanitizer.address_poison(block.base[old_committed:block.committed])
+	}
+	return
+}
+
+/*
+Hand out `min_size` bytes of `block`, aligned to `alignment`.
+
+Under AddressSanitizer each piece starts on a shadow granule and is followed by a poisoned
+redzone, and only its own bytes are unpoisoned (see `sanitizer.ADDRESS_GRANULE`).
+*/
 @(require_results, no_sanitize_address)
 alloc_from_memory_block :: proc(block: ^Memory_Block, min_size, alignment: uint, default_commit_size: uint = 0) -> (data: []byte, err: Allocator_Error) {
 	@(no_sanitize_address)
@@ -125,40 +165,18 @@ alloc_from_memory_block :: proc(block: ^Memory_Block, min_size, alignment: uint,
 			alignment_offset = uint(alignment - (ptr & mask))
 		}
 		return alignment_offset
-		
-	}
-	@(no_sanitize_address)
-	do_commit_if_necessary :: proc(block: ^Memory_Block, size: uint, default_commit_size: uint) -> (err: Allocator_Error) {
-		if block.committed - block.used < size {
-			pmblock := (^Platform_Memory_Block)(block)
-			base_offset := uint(uintptr(pmblock.block.base) - uintptr(pmblock))
 
-			// NOTE(bill): [Heuristic] grow the commit size larger than needed
-			// TODO(bill): determine a better heuristic for this behaviour
-			extra_size := max(size, block.committed>>1)
-			platform_total_commit := base_offset + block.used + extra_size
-			platform_total_commit = align_formula(platform_total_commit, uint(mem.PAGE_SIZE))
-			platform_total_commit = min(max(platform_total_commit, default_commit_size), pmblock.reserved)
-
-			assert(pmblock.committed <= pmblock.reserved)
-			assert(pmblock.committed < platform_total_commit)
-
-			platform_memory_commit(pmblock, platform_total_commit) or_return
-
-			pmblock.committed = platform_total_commit
-			block.committed = pmblock.committed - base_offset
-			assert(block.committed <= block.reserved)
-		}
-		return
 	}
 
 	if block == nil {
 		return nil, .Out_Of_Memory
 	}
 
-	alignment_offset := calc_alignment_offset(block, uintptr(alignment))
-	size, size_ok := safe_add(min_size, alignment_offset)
-	if !size_ok {
+	piece_alignment := uint(sanitizer.address_align(int(alignment)))
+	alignment_offset := calc_alignment_offset(block, uintptr(piece_alignment))
+	padded, padded_ok := safe_add(min_size, uint(sanitizer.ADDRESS_REDZONE))
+	size, size_ok := safe_add(padded, alignment_offset)
+	if !padded_ok || !size_ok {
 		err = .Out_Of_Memory
 		return
 	}
@@ -167,15 +185,13 @@ alloc_from_memory_block :: proc(block: ^Memory_Block, min_size, alignment: uint,
 		err = .Out_Of_Memory
 		return
 	}
-
-	do_commit_if_necessary(block, size, default_commit_size) or_return
+	memory_block_commit_for(block, size, default_commit_size) or_return
 
 	data = block.base[block.used+alignment_offset:][:min_size]
 	block.used += size
-	// sanitizer.address_unpoison(data)
+	sanitizer.address_unpoison(data)
 	return
 }
-
 
 @(no_sanitize_address)
 memory_block_dealloc :: proc(block_to_free: ^Memory_Block) {

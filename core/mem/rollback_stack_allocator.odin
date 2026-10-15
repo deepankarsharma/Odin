@@ -1,7 +1,7 @@
 package mem
 
 import "base:runtime"
-// import "base:sanitizer"
+import "base:sanitizer"
 
 /*
 Rollback stack default block size.
@@ -99,23 +99,39 @@ rb_rollback_block :: proc(block: ^Rollback_Stack_Block, header: ^Rollback_Stack_
 }
 
 /*
+Return a block to the block allocator, its buffer's poison lifted first: the block allocator
+may hand the bytes to code that does not expect them poisoned.
+*/
+@(private="file", no_sanitize_address)
+rb_free_block :: proc(stack: ^Rollback_Stack, block: ^Rollback_Stack_Block) {
+	sanitizer.address_unpoison(block.buffer)
+	runtime.mem_free_with_size(block, size_of(Rollback_Stack_Block) + len(block.buffer), stack.block_allocator)
+}
+
+/*
 Free memory to a rollback stack allocator.
+
+Under AddressSanitizer the freed bytes are poisoned at once when their size is known (`size`
+is not 0), and otherwise once the stack rolls back over them.
 */
 @(private="file", require_results, no_sanitize_address)
-rb_free :: proc(stack: ^Rollback_Stack, ptr: rawptr) -> Allocator_Error {
+rb_free :: proc(stack: ^Rollback_Stack, ptr: rawptr, size: int) -> Allocator_Error {
 	parent, block, header := rb_find_ptr(stack, ptr) or_return
 
 	if header.is_free {
 		return .Invalid_Pointer
 	}
 	header.is_free = true
+	sanitizer.address_poison(ptr, size)
 	if block.last_alloc == ptr {
+		end := block.offset
 		block.offset = header.prev_offset
 		rb_rollback_block(block, header)
+		sanitizer.address_poison(raw_data(block.buffer)[block.offset:end])
 	}
 	if parent != nil && block.offset == 0 {
 		parent.next_block = block.next_block
-		runtime.mem_free_with_size(block, size_of(Rollback_Stack_Block) + len(block.buffer), stack.block_allocator)
+		rb_free_block(stack, block)
 	}
 	return nil
 }
@@ -127,14 +143,14 @@ Free all memory owned by the rollback stack allocator.
 rb_free_all :: proc(stack: ^Rollback_Stack) {
 	for block := stack.head.next_block; block != nil; /**/ {
 		next_block := block.next_block
-		runtime.mem_free_with_size(block, size_of(Rollback_Stack_Block) + len(block.buffer), stack.block_allocator)
+		rb_free_block(stack, block)
 		block = next_block
 	}
 
+	sanitizer.address_poison(stack.head.buffer[:stack.head.offset])
 	stack.head.next_block = nil
 	stack.head.last_alloc = nil
 	stack.head.offset = 0
-	// sanitizer.address_poison(stack.head.buffer)
 }
 
 /*
@@ -197,6 +213,10 @@ rb_alloc_bytes_non_zeroed :: proc(
 ) -> (result: []byte, err: Allocator_Error) {
 	assert(size >= 0, "Size must be positive or zero.", loc)
 	assert(is_power_of_two(cast(uintptr)alignment), "Alignment must be a power of two.", loc)
+	// Under AddressSanitizer each allocation starts on a shadow granule and a poisoned redzone
+	// follows it (see `sanitizer.ADDRESS_GRANULE`).
+	piece_alignment := sanitizer.address_align(alignment)
+	padded := sanitizer.address_padded(size)
 	parent: ^Rollback_Stack_Block
 
 	for block := stack.head; /**/; block = block.next_block {
@@ -207,7 +227,7 @@ rb_alloc_bytes_non_zeroed :: proc(
 			if stack.block_allocator.procedure == nil {
 				return nil, .Out_Of_Memory
 			}
-			minimum_size_required := size_of(Rollback_Stack_Header) + size + alignment - 1
+			minimum_size_required := size_of(Rollback_Stack_Header) + padded + piece_alignment - 1
 			new_block_size := max(minimum_size_required, stack.block_size)
 			block = rb_make_block(new_block_size, stack.block_allocator) or_return
 			parent.next_block = block
@@ -216,8 +236,8 @@ rb_alloc_bytes_non_zeroed :: proc(
 			}
 		}
 		start := raw_data(block.buffer)[block.offset:]
-		padding := cast(uintptr)calc_padding_with_header(cast(uintptr)start, cast(uintptr)alignment, size_of(Rollback_Stack_Header))
-		if block.offset + padding + cast(uintptr)size > cast(uintptr)len(block.buffer) {
+		padding := cast(uintptr)calc_padding_with_header(cast(uintptr)start, cast(uintptr)piece_alignment, size_of(Rollback_Stack_Header))
+		if block.offset + padding + cast(uintptr)padded > cast(uintptr)len(block.buffer) {
 			when !ODIN_DISABLE_ASSERT {
 				if allocated_new_block {
 					panic("Rollback Stack Allocator allocated a new block but did not use it.")
@@ -234,14 +254,14 @@ rb_alloc_bytes_non_zeroed :: proc(
 			is_free = false,
 		}
 		block.last_alloc = ptr
-		block.offset += padding + cast(uintptr)size
+		block.offset += padding + cast(uintptr)padded
 		if len(block.buffer) > stack.block_size {
 			// This block exceeds the allocator's standard block size and is considered a singleton.
 			// Prevent any further allocations on it.
 			block.offset = cast(uintptr)len(block.buffer)
 		}
 		res := ptr[:size]
-		// sanitizer.address_unpoison(res)
+		sanitizer.address_unpoison(res)
 		return res, nil
 	}
 	return nil, .Out_Of_Memory
@@ -338,14 +358,17 @@ rb_resize_bytes_non_zeroed :: proc(
 					block.offset += cast(uintptr)size - cast(uintptr)old_size
 				}
 				res := (ptr)[:size]
-				// sanitizer.address_unpoison(res)
+				sanitizer.address_unpoison(res)
+				if size < old_size {
+					sanitizer.address_poison(ptr[size:old_size])
+				}
 				#no_bounds_check return res, nil
 			}
 		}
 	}
 	result = rb_alloc_bytes_non_zeroed(stack, size, alignment) or_return
 	runtime.mem_copy_non_overlapping(raw_data(result), ptr, min(old_size, size))
-	err = rb_free(stack, ptr)
+	err = rb_free(stack, ptr, old_size)
 	return
 }
 
@@ -354,6 +377,7 @@ rb_make_block :: proc(size: int, allocator: Allocator) -> (block: ^Rollback_Stac
 	buffer := runtime.mem_alloc(size_of(Rollback_Stack_Block) + size, align_of(Rollback_Stack_Block), allocator) or_return
 	block = cast(^Rollback_Stack_Block)raw_data(buffer)
 	#no_bounds_check block.buffer = buffer[size_of(Rollback_Stack_Block):]
+	sanitizer.address_poison(block.buffer)
 	return
 }
 
@@ -367,6 +391,7 @@ rollback_stack_init_buffered :: proc(stack: ^Rollback_Stack, buffer: []byte, loc
 	block := cast(^Rollback_Stack_Block)raw_data(buffer)
 	block^ = {}
 	#no_bounds_check block.buffer = buffer[size_of(Rollback_Stack_Block):]
+	sanitizer.address_poison(block.buffer)
 	stack^ = {}
 	stack.head = block
 	stack.block_size = len(block.buffer)
@@ -411,7 +436,10 @@ Destroy a rollback stack.
 rollback_stack_destroy :: proc(stack: ^Rollback_Stack) {
 	if stack.block_allocator.procedure != nil {
 		rb_free_all(stack)
-		free(stack.head, stack.block_allocator)
+		rb_free_block(stack, stack.head)
+	} else if stack.head != nil {
+		// The caller's buffer is theirs again, unpoisoned.
+		sanitizer.address_unpoison(stack.head.buffer)
 	}
 	stack^ = {}
 }
@@ -471,7 +499,7 @@ rollback_stack_allocator_proc :: proc(
 	case .Alloc_Non_Zeroed:
 		return rb_alloc_bytes_non_zeroed(stack, size, alignment, loc)
 	case .Free:
-		return nil, rb_free(stack, old_memory)
+		return nil, rb_free(stack, old_memory, old_size)
 	case .Free_All:
 		rb_free_all(stack)
 		return nil, nil

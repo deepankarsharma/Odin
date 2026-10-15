@@ -1,5 +1,6 @@
 package mem_virtual
 
+import "base:sanitizer"
 import "core:mem"
 import "core:sync"
 
@@ -55,7 +56,7 @@ arena_init_growing :: proc(arena: ^Arena, reserved: uint = DEFAULT_ARENA_GROWING
 	if arena.minimum_block_size == 0 {
 		arena.minimum_block_size = reserved
 	}
-	// sanitizer.address_poison(arena.curr_block.base[:arena.curr_block.committed])
+	sanitizer.address_poison(arena.curr_block.base[:arena.curr_block.committed])
 	return
 }
 
@@ -68,7 +69,7 @@ arena_init_static :: proc(arena: ^Arena, reserved: uint = DEFAULT_ARENA_STATIC_R
 	arena.curr_block     = memory_block_alloc(commit_size, reserved, {}) or_return
 	arena.total_used     = 0
 	arena.total_reserved = arena.curr_block.reserved
-	// sanitizer.address_poison(arena.curr_block.base[:arena.curr_block.committed])
+	sanitizer.address_poison(arena.curr_block.base[:arena.curr_block.committed])
 	return
 }
 
@@ -82,7 +83,6 @@ arena_init_buffer :: proc(arena: ^Arena, buffer: []byte) -> (err: Allocator_Erro
 
 	arena.kind = .Buffer
 
-	// sanitizer.address_poison(buffer[:])
 
 	block_base := raw_data(buffer)
 	block := (^Memory_Block)(block_base)
@@ -90,6 +90,7 @@ arena_init_buffer :: proc(arena: ^Arena, buffer: []byte) -> (err: Allocator_Erro
 	block.reserved  = len(buffer) - size_of(Memory_Block)
 	block.committed = block.reserved
 	block.used      = 0
+	sanitizer.address_poison(block.base[:block.reserved])
 
 	arena.curr_block = block
 	arena.total_used = 0
@@ -139,10 +140,11 @@ arena_alloc_unguarded :: proc(arena: ^Arena, size: uint, alignment: uint, loc :=
 					max(arena.default_commit_size, arena.minimum_block_size)
 			}
 
-			needed := max(size, arena.default_commit_size)
+			needed := max(uint(sanitizer.address_padded(int(size))), arena.default_commit_size)
 			block_size := max(needed, arena.minimum_block_size)
 
 			new_block := memory_block_alloc(needed, block_size, alignment) or_return
+			sanitizer.address_poison(new_block.base[:new_block.committed])
 			new_block.prev = arena.curr_block
 			arena.curr_block = new_block
 			arena.total_reserved += new_block.reserved
@@ -184,14 +186,17 @@ arena_static_reset_to :: proc(arena: ^Arena, pos: uint, loc := #caller_location)
 	if arena.curr_block != nil {
 		assert(arena.kind != .Growing, "expected a non .Growing arena", loc)
 
-		prev_pos := arena.curr_block.used
-		arena.curr_block.used = clamp(pos, 0, arena.curr_block.reserved)
+		block := arena.curr_block
+		prev_pos := block.used
+		block.used = clamp(pos, 0, block.reserved)
 
 		if prev_pos > pos {
-			mem.zero_slice(arena.curr_block.base[arena.curr_block.used:][:prev_pos-pos])
+			// Zeroing reads nothing, but ASan checks a memset's bytes all the same.
+			sanitizer.address_unpoison(block.base[block.used:prev_pos])
+			mem.zero_slice(block.base[block.used:][:prev_pos-pos])
+			sanitizer.address_poison(block.base[block.used:prev_pos])
 		}
-		arena.total_used = arena.curr_block.used
-		// sanitizer.address_poison(arena.curr_block.base[:arena.curr_block.committed])
+		arena.total_used = block.used
 		return true
 	} else if pos == 0 {
 		arena.total_used = 0
@@ -228,9 +233,10 @@ arena_free_all :: proc(arena: ^Arena, loc := #caller_location) {
 		if arena.curr_block != nil {
 			curr_block_used := int(arena.curr_block.used)
 			arena.curr_block.used = 0
-			// sanitizer.address_unpoison(arena.curr_block.base[:curr_block_used])
+			// Zeroing reads nothing, but ASan checks a memset's bytes all the same.
+			sanitizer.address_unpoison(arena.curr_block.base[:curr_block_used])
 			mem.zero(arena.curr_block.base, curr_block_used)
-			// sanitizer.address_poison(arena.curr_block.base[:arena.curr_block.committed])
+			sanitizer.address_poison(arena.curr_block.base[:curr_block_used])
 		}
 		arena.total_used = 0
 	case .Static, .Buffer:
@@ -252,7 +258,10 @@ arena_destroy :: proc(arena: ^Arena, loc := #caller_location) {
 	case .Static:
 		memory_block_dealloc(arena.curr_block)
 	case .Buffer:
-		// nothing
+		// The caller's buffer is theirs again, unpoisoned.
+		if block := arena.curr_block; block != nil {
+			sanitizer.address_unpoison(block.base[:block.reserved])
+		}
 	}
 	arena.curr_block     = nil
 	arena.total_used     = 0
@@ -338,6 +347,9 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: mem.Allocator_Mode,
 	case .Alloc, .Alloc_Non_Zeroed:
 		return arena_alloc(arena, size, alignment, location)
 	case .Free:
+		// The arena reuses nothing freed, but under ASan freed bytes of a known size are
+		// poisoned, so a use after the free is reported.
+		sanitizer.address_poison(old_memory, int(old_size))
 		err = .Mode_Not_Implemented
 	case .Free_All:
 		arena_free_all(arena, location)
@@ -362,7 +374,7 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: mem.Allocator_Mode,
 			if size < old_size {
 				// shrink data in-place
 				data = old_data[:size]
-				// sanitizer.address_poison(old_data[size:old_size])
+				sanitizer.address_poison(old_data[size:old_size])
 				return
 			}
 
@@ -370,13 +382,16 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: mem.Allocator_Mode,
 				start := uint(uintptr(old_memory)) - uint(uintptr(block.base))
 				old_end := start + old_size
 				new_end := start + size
-				if start < old_end && old_end == block.used && new_end <= block.reserved {
+				// The last piece, followed by its redzone under ASan.
+				redzone := uint(sanitizer.ADDRESS_REDZONE)
+				if start < old_end && old_end + redzone == block.used && new_end + redzone <= block.reserved {
 					// grow data in-place, adjusting next allocation
-					prev_used := block.used
-					_ = alloc_from_memory_block(block, new_end - old_end, 1, default_commit_size=arena.default_commit_size) or_return
-					arena.total_used += block.used - prev_used
+					grow := new_end - old_end
+					memory_block_commit_for(block, grow, arena.default_commit_size) or_return
+					block.used += grow
+					arena.total_used += grow
 					data = block.base[start:new_end]
-					// sanitizer.address_unpoison(data)
+					sanitizer.address_unpoison(data)
 					return
 				}
 			}
@@ -387,7 +402,7 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: mem.Allocator_Mode,
 			return
 		}
 		copy(new_memory, old_data[:old_size])
-		// sanitizer.address_poison(old_data[:old_size])
+		sanitizer.address_poison(old_data[:old_size])
 		return new_memory, nil
 	case .Query_Features:
 		set := (^mem.Allocator_Mode_Set)(old_memory)
@@ -453,7 +468,10 @@ arena_temp_end :: proc(temp: Arena_Temp, loc := #caller_location) {
 		if block := arena.curr_block; block != nil {
 			assert(block.used >= temp.used, "out of order use of arena_temp_end", loc)
 			amount_to_zero := block.used-temp.used
+			// Zeroing reads nothing, but ASan checks a memset's bytes all the same.
+			sanitizer.address_unpoison(block.base[temp.used:block.used])
 			mem.zero_slice(block.base[temp.used:][:amount_to_zero])
+			sanitizer.address_poison(block.base[temp.used:block.used])
 			block.used = temp.used
 			arena.total_used -= amount_to_zero
 		}

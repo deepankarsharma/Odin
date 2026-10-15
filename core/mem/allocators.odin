@@ -18,7 +18,11 @@ import "base:runtime"
 //
 // https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm#mapping
 //
-// import "base:sanitizer"
+// `Arena` and `Dynamic_Arena` have had that review: each piece they hand out
+// starts on a granule and is followed by a redzone (see
+// `sanitizer.ADDRESS_GRANULE`). `Scratch`, `Stack`, `Small_Stack` and
+// `Buddy_Allocator` have not, and still do not poison.
+import "base:sanitizer"
 
 
 /*
@@ -188,7 +192,7 @@ arena_init :: proc(a: ^Arena, data: []byte) {
 	a.offset     = 0
 	a.peak_used  = 0
 	a.temp_count = 0
-	// sanitizer.address_poison(a.data)
+	sanitizer.address_poison(a.data)
 }
 
 /*
@@ -267,17 +271,18 @@ arena_alloc_bytes_non_zeroed :: proc(
 	if a.data == nil {
 		panic("Allocation on uninitialized Arena allocator.", loc)
 	}
+	// Under AddressSanitizer each allocation starts on a shadow granule and a poisoned redzone
+	// follows it (see `sanitizer.ADDRESS_GRANULE`).
 	#no_bounds_check end := &a.data[a.offset]
-	ptr := align_forward(end, uintptr(alignment))
-	total_size := size + ptr_sub((^byte)(ptr), (^byte)(end))
+	ptr := align_forward(end, uintptr(sanitizer.address_align(alignment)))
+	total_size := sanitizer.address_padded(size) + ptr_sub((^byte)(ptr), (^byte)(end))
 	if a.offset + total_size > len(a.data) {
 		return nil, .Out_Of_Memory
 	}
 	a.offset += total_size
 	a.peak_used = max(a.peak_used, a.offset)
 	result := byte_slice(ptr, size)
-	// ensure_poisoned(result)
-	// sanitizer.address_unpoison(result)
+	sanitizer.address_unpoison(result)
 	return result, nil
 }
 
@@ -285,8 +290,8 @@ arena_alloc_bytes_non_zeroed :: proc(
 Free all memory back to the arena allocator.
 */
 arena_free_all :: proc(a: ^Arena) {
+	sanitizer.address_poison(a.data[:a.offset])
 	a.offset = 0
-	// sanitizer.address_poison(a.data)
 }
 
 arena_allocator_proc :: proc(
@@ -305,6 +310,9 @@ arena_allocator_proc :: proc(
 	case .Alloc_Non_Zeroed:
 		return arena_alloc_bytes_non_zeroed(arena, size, alignment, loc)
 	case .Free:
+		// The arena reuses nothing freed, but under ASan freed bytes of a known size are
+		// poisoned, so a use after the free, or after a resize that moved them, is reported.
+		sanitizer.address_poison(old_memory, old_size)
 		return nil, .Mode_Not_Implemented
 	case .Free_All:
 		arena_free_all(arena)
@@ -364,7 +372,7 @@ allocations *inside* the temporary memory region will be freed to the arena.
 end_arena_temp_memory :: proc(tmp: Arena_Temp_Memory) {
 	assert(tmp.arena.offset >= tmp.prev_offset)
 	assert(tmp.arena.temp_count > 0)
-	// sanitizer.address_poison(tmp.arena.data[tmp.prev_offset:tmp.arena.offset])
+	sanitizer.address_poison(tmp.arena.data[tmp.prev_offset:tmp.arena.offset])
 	tmp.arena.offset = tmp.prev_offset
 	tmp.arena.temp_count -= 1
 }
@@ -1750,7 +1758,7 @@ _dynamic_arena_cycle_new_block :: proc(a: ^Dynamic_Arena, alignment: int, loc :=
 			nil,
 			0,
 		)
-		// sanitizer.address_poison(data)
+		sanitizer.address_poison(data)
 		new_block = raw_data(data)
 	}
 	a.bytes_left    = a.block_size
@@ -1822,8 +1830,14 @@ dynamic_arena_alloc_bytes_non_zeroed :: proc(a: ^Dynamic_Arena, size: int, align
 		}
 		return memory, err
 	}
-	actual_alignment := max(a.minimum_alignment, alignment)
-	n := align_formula(size, actual_alignment)
+	// Under AddressSanitizer each allocation starts on a shadow granule and a poisoned redzone
+	// follows it (see `sanitizer.ADDRESS_GRANULE`), unless the redzone would not fit in a block:
+	// the block allocator's own redzone then follows the allocation.
+	actual_alignment := sanitizer.address_align(max(a.minimum_alignment, alignment))
+	n := align_formula(sanitizer.address_padded(size), actual_alignment)
+	if n > a.block_size {
+		n = align_formula(size, actual_alignment)
+	}
 	if n > a.block_size {
 		return nil, .Invalid_Argument
 	}
@@ -1843,8 +1857,7 @@ dynamic_arena_alloc_bytes_non_zeroed :: proc(a: ^Dynamic_Arena, size: int, align
 	a.current_pos = ([^]byte)(memory)[n:]
 	a.bytes_left -= margin + n
 	result := ([^]byte)(memory)[:size]
-	// ensure_poisoned(result)
-	// sanitizer.address_unpoison(result)
+	sanitizer.address_unpoison(result)
 	return result, nil
 }
 
@@ -1856,12 +1869,13 @@ the unused blocks.
 */
 dynamic_arena_reset :: proc(a: ^Dynamic_Arena, loc := #caller_location) {
 	if a.current_block != nil {
-		// sanitizer.address_poison(a.current_block, a.block_size)
+		used := int(uintptr(a.current_pos) - uintptr(a.current_block))
+		sanitizer.address_poison(a.current_block, used)
 		append(&a.unused_blocks, a.current_block, loc=loc)
 		a.current_block = nil
 	}
 	for block in a.used_blocks {
-		// sanitizer.address_poison(block, a.block_size)
+		sanitizer.address_poison(block, a.block_size)
 		append(&a.unused_blocks, block, loc=loc)
 	}
 	clear(&a.used_blocks)
@@ -1881,7 +1895,7 @@ the unused blocks.
 dynamic_arena_free_all :: proc(a: ^Dynamic_Arena, loc := #caller_location) {
 	dynamic_arena_reset(a)
 	for block in a.unused_blocks {
-		// sanitizer.address_unpoison(block, a.block_size)
+		sanitizer.address_unpoison(block, a.block_size)
 		free(block, a.block_allocator, loc)
 	}
 	clear(&a.unused_blocks)
@@ -2003,7 +2017,7 @@ dynamic_arena_resize_bytes_non_zeroed :: proc(
 	old_memory := raw_data(old_data)
 	old_size := len(old_data)
 	if old_size >= size {
-		// sanitizer.address_poison(old_data[size:])
+		sanitizer.address_poison(old_data[size:])
 		return byte_slice(old_memory, size), nil
 	}
 	// No information is kept about allocations in this allocator, thus we
@@ -2011,6 +2025,8 @@ dynamic_arena_resize_bytes_non_zeroed :: proc(
 	data, err := dynamic_arena_alloc_bytes_non_zeroed(a, size, alignment, loc)
 	if err == nil {
 		runtime.copy(data, byte_slice(old_memory, old_size))
+		// The old bytes are dead: a use of them is reported under ASan.
+		sanitizer.address_poison(old_memory, old_size)
 	}
 	return data, err
 }
@@ -2031,6 +2047,9 @@ dynamic_arena_allocator_proc :: proc(
 	case .Alloc_Non_Zeroed:
 		return dynamic_arena_alloc_bytes_non_zeroed(arena, size, alignment, loc)
 	case .Free:
+		// The arena reuses nothing freed, but under ASan freed bytes of a known size are
+		// poisoned, so a use after the free is reported.
+		sanitizer.address_poison(old_memory, old_size)
 		return nil, .Mode_Not_Implemented
 	case .Free_All:
 		dynamic_arena_free_all(arena, loc)

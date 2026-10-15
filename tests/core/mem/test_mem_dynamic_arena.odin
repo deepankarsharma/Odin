@@ -1,5 +1,6 @@
 package test_core_mem
 
+import "base:sanitizer"
 import "core:testing"
 import "core:mem"
 
@@ -13,6 +14,11 @@ expect_arena_allocation :: proc(t: ^testing.T, expected_used_bytes, num_bytes, a
 	testing.expect(t, err == .None)
 	testing.expect(t, element != nil)
 
+	expected_used_bytes := expected_used_bytes
+	when sanitizer.ADDRESS_SANITIZER {
+		// Each piece starts on a shadow granule and a redzone follows it.
+		expected_used_bytes = mem.align_forward_int(num_bytes + sanitizer.ADDRESS_REDZONE, max(alignment, sanitizer.ADDRESS_GRANULE))
+	}
 	expected_bytes_left := arena.block_size - expected_used_bytes
 	testing.expectf(t, arena.bytes_left == expected_bytes_left,
 		`
@@ -107,9 +113,10 @@ expect_reused_block_alignment :: proc(
 
 @(test)
 test_dynamic_arena_realigns_reused_block :: proc(t: ^testing.T) {
+	// Under AddressSanitizer the backing arena leaves a redzone after the block it hands out.
 	Backing :: struct #align(64) {
 		_:    [16]byte,
-		data: [128]byte,
+		data: [128 + sanitizer.ADDRESS_REDZONE]byte,
 	}
 
 	backing: Backing
@@ -118,9 +125,11 @@ test_dynamic_arena_realigns_reused_block :: proc(t: ^testing.T) {
 
 @(test)
 test_dynamic_arena_skips_incompatible_reused_block :: proc(t: ^testing.T) {
+	// Under AddressSanitizer the backing arena leaves a redzone after the first block, and the
+	// second, aligned to 64, then still starts where it does without one.
 	Backing :: struct #align(64) {
 		_:    [16]byte,
-		data: [176]byte,
+		data: [176 + sanitizer.ADDRESS_REDZONE]byte,
 	}
 
 	backing: Backing

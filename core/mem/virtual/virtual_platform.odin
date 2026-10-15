@@ -1,6 +1,8 @@
 #+private
 package mem_virtual
 
+import "base:sanitizer"
+
 Platform_Memory_Block :: struct {
 	block:      Memory_Block,
 	committed:  uint,
@@ -30,6 +32,9 @@ platform_memory_alloc :: proc "contextless" (to_commit, to_reserve: uint) -> (bl
 @(no_sanitize_address)
 platform_memory_free :: proc "contextless" (block: ^Platform_Memory_Block) {
 	if block != nil {
+		// ASan's shadow outlives the mapping: lift any poison an arena left on the committed
+		// bytes, or the next mapping at these addresses would inherit it.
+		sanitizer.address_unpoison(block, block.committed)
 		release(block, block.reserved)
 	}
 }
