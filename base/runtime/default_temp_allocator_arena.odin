@@ -209,6 +209,9 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 	case .Alloc, .Alloc_Non_Zeroed:
 		return arena_alloc(arena, size, alignment, location)
 	case .Free:
+		// The arena reuses nothing freed, but under ASan freed bytes of a known size are
+		// poisoned, so a use after the free is reported.
+		sanitizer.address_poison(old_memory, int(old_size))
 		err = .Mode_Not_Implemented
 	case .Free_All:
 		arena_free_all(arena, location)

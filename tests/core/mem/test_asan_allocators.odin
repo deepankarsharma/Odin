@@ -92,6 +92,10 @@ test_asan_runtime_arena :: proc(t: ^testing.T) {
 	m, _ := runtime.mem_resize(raw_data(s), 10, 5000, 8, allocator)
 	expect_handed_out(t, m)
 
+	f, _ := runtime.mem_alloc(24, 8, allocator)
+	runtime.mem_free_with_size(raw_data(f), 24, allocator)
+	expect_dead(t, f)
+
 	runtime.arena_free_all(&arena)
 	expect_dead(t, m)
 }
