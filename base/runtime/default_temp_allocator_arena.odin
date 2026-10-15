@@ -257,6 +257,8 @@ arena_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 			return
 		}
 		copy(new_memory, old_data[:old_size])
+		// The bytes left behind are dead, as freed ones are.
+		sanitizer.address_poison(old_data[:old_size])
 		return new_memory, nil
 	case .Query_Features:
 		set := (^Allocator_Mode_Set)(old_memory)
