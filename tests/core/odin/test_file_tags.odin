@@ -108,6 +108,26 @@ package main`,
 				{{.Freestanding, .wasm64p32, ""}, true},
 				{{.Freestanding, .arm64,     ""}, false},
 			},
+		}, {// [6]
+			// Enough names that the list holding them moves as it grows.
+			src = `
+#+build-project-name a, b, c, d, e, f, g, h, i, j
+#+build-project-name k, l, m !n, o, p, q, r, s
+package main
+			`,
+			tags = {
+				build_project_name = {
+					{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}, {"g"}, {"h"}, {"i"}, {"j"},
+					{"k"}, {"l"}, {"m", "!n"}, {"o"}, {"p"}, {"q"}, {"r"}, {"s"},
+				},
+			},
+			matching_targets = {
+				{{.Linux, .amd64, "a"}, true},
+				{{.Linux, .amd64, "m"}, true},
+				{{.Linux, .amd64, "s"}, true},
+				{{.Linux, .amd64, "n"}, false},
+				{{.Linux, .amd64, "z"}, false},
+			},
 		},
 	}
 
